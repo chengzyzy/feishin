@@ -1,0 +1,62 @@
+name: Publish verified Feishin Local Nightly
+
+on:
+  push:
+    branches:
+      - codex/fix-feishin-security-v261111
+    paths:
+      - .github/workflows/publish-local-nightly.yml
+
+permissions: {}
+
+concurrency:
+  group: feishin-local-nightly-20261111-1f64815
+
+jobs:
+  publish:
+    if: github.repository == 'chengzyzy/feishin'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download verified arm64 DMG from run 42991886792
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: '42991886792'
+          artifact-ids: '13841889678'
+          path: ${{ runner.temp }}/feishin-nightly
+          digest-mismatch: error
+
+      - name: Verify SHA-256 and publish the Nightly prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/feishin-nightly"
+          source_dmg='Feishin Local-1.17.0-mac-arm64.dmg'
+          release_dmg=Feishin-Local-1.17.0-mac-arm64.dmg
+          read -r actual_sha _ < <(sha256sum "$source_dmg")
+          if [[ "$actual_sha" != 'dcea834f6c2ea49a75ee9cf813c92e8c776a1c935f0ceddfcd1729fa27711f63' ]]; then
+            echo '::error::DMG SHA-256 mismatch'
+            exit 1
+          fi
+          mv "$source_dmg" "$release_dmg"
+
+          cat > release-notes.md <<'NOTES'
+          Feishin Local 1.17.0，适用于 Apple 芯片的 Mac。
+
+          DMG 来自 [已验证的构建 #42991886792](https://github.com/chengzyzy/feishin/actions/runs/42991886792)，源码提交为 `1f648153843c8e0ed9988f7da275252f07154c2e`。CI 核对了架构、应用标识、签名完整性和空白配置首次启动。
+
+          应用采用 ad-hoc 签名，未做 Apple 公证。
+
+          DMG SHA-256 `dcea834f6c2ea49a75ee9cf813c92e8c776a1c935f0ceddfcd1729fa27711f63`
+          NOTES
+
+          gh release create nightly-20261111-1f64815 "$release_dmg" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target 1f648153843c8e0ed9988f7da275252f07154c2e \
+            --prerelease --latest=false \
+            --title 'Feishin Local Nightly 2026-11-11' --notes-file release-notes.md
