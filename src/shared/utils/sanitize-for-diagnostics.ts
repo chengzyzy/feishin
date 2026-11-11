@@ -1,4 +1,4 @@
-const SENSITIVE_KEY_PATTERN = /password|token|credential|authorization|secret|cookie/i;
+const SENSITIVE_KEY_PATTERN = /password|token|credential|authorization|secret|cookie|api[-_]?key/i;
 const MAX_DEPTH = 20;
 
 /**

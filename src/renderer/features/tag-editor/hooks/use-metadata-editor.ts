@@ -118,6 +118,8 @@ export const useMetadataEditor = ({ browser, songs: songsProp, utils }: UseMetad
     const [removedKeys, setRemovedKeys] = useState<Set<string>>(new Set());
     const [artworkDisplayUrl, setArtworkDisplayUrl] = useState<null | string>(null);
     const [artworkOp, setArtworkOp] = useState<ArtworkOp | null>(null);
+    const audioGrantRef = useRef<null | { grantId: string; paths: Map<string, string> }>(null);
+    const audioSelectionRef = useRef(0);
 
     const setRescan = useCallback(
         (value: boolean) => setSettings({ tagEditor: { triggerRescan: value } }),
@@ -237,6 +239,26 @@ export const useMetadataEditor = ({ browser, songs: songsProp, utils }: UseMetad
         return { displayFields, mixedKeys, sortedFieldEntries };
     }, [tagSummary, editedFields, multiValueKeys]);
 
+    const authorizeAudioFiles = useCallback(async (paths: string[]) => {
+        const selection = ++audioSelectionRef.current;
+        const grant = await window.api.files.authorizeLocalFiles(paths, 'audio');
+        if (!grant) return null;
+
+        if (selection !== audioSelectionRef.current || grant.paths.length !== paths.length) {
+            void window.api.files.releaseGrant(grant.grantId);
+            return null;
+        }
+        if (audioGrantRef.current) {
+            void window.api.files.releaseGrant(audioGrantRef.current.grantId);
+        }
+        const selectedFiles = {
+            grantId: grant.grantId,
+            paths: new Map(paths.map((filePath, index) => [filePath, grant.paths[index]])),
+        };
+        audioGrantRef.current = selectedFiles;
+        return selectedFiles;
+    }, []);
+
     /** Reads metadata for all songs and populates the editor state. */
     const initialize = useCallback(async () => {
         setError(null);
@@ -260,8 +282,20 @@ export const useMetadataEditor = ({ browser, songs: songsProp, utils }: UseMetad
         setResolvedSongs(songs);
         const paths = songs.map((s) => resolveSongPath(s.path)).filter(Boolean) as string[];
 
+        const selectedFiles = await authorizeAudioFiles(paths);
+        if (!selectedFiles) {
+            setError(
+                t(
+                    'page.itemDetail.fileAccessDenied',
+                    'Local file access was not authorized for tag editing',
+                ),
+            );
+            setIsLoading(false);
+            return;
+        }
+
         const batchResult = await withBatchProgress(utils, setLoadProgress, () =>
-            utils.readSongMetadataBatch(paths),
+            utils.readSongMetadataBatch(selectedFiles.grantId),
         );
 
         if (!batchResult.success || !batchResult.tagSummary) {
@@ -287,9 +321,19 @@ export const useMetadataEditor = ({ browser, songs: songsProp, utils }: UseMetad
             );
         }
 
+        const mapToSongPaths = <T>(metadata: Record<string, T> = {}): Record<string, T> => {
+            const songMetadata: Record<string, T> = {};
+            for (const [songPath, canonicalPath] of selectedFiles.paths) {
+                if (Object.hasOwn(metadata, canonicalPath)) {
+                    songMetadata[songPath] = metadata[canonicalPath];
+                }
+            }
+            return songMetadata;
+        };
+
         setMergedTagSummary(batchResult.tagSummary);
-        setFileTags(batchResult.fileTags ?? {});
-        setFileArtwork(batchResult.fileArtwork ?? {});
+        setFileTags(mapToSongPaths(batchResult.fileTags));
+        setFileArtwork(mapToSongPaths(batchResult.fileArtwork));
         setBatchMultiValueKeys(new Set(batchResult.multiValueKeys ?? []));
         setMergedArtworkKind(batchResult.artworkKind);
 
@@ -302,7 +346,7 @@ export const useMetadataEditor = ({ browser, songs: songsProp, utils }: UseMetad
         setMergedArtwork(nextMergedArtwork);
         setArtworkDisplayUrl(nextMergedArtwork ? toArtworkDataUrl(nextMergedArtwork) : null);
         setIsLoading(false);
-    }, [songsProp, t, utils]);
+    }, [authorizeAudioFiles, songsProp, t, utils]);
 
     const reload = useCallback(() => {
         initialize().catch((err) => {
@@ -316,7 +360,14 @@ export const useMetadataEditor = ({ browser, songs: songsProp, utils }: UseMetad
     useEffect(() => {
         reload();
 
-        return () => utils.cancelReadSongMetadata();
+        return () => {
+            utils.cancelReadSongMetadata();
+            audioSelectionRef.current += 1;
+            if (audioGrantRef.current) {
+                void window.api.files.releaseGrant(audioGrantRef.current.grantId);
+                audioGrantRef.current = null;
+            }
+        };
     }, [reload, utils]);
 
     /** Records an edited value for `key`, overriding the on-disk summary. */
@@ -387,15 +438,38 @@ export const useMetadataEditor = ({ browser, songs: songsProp, utils }: UseMetad
 
     /** Opens a native file picker, reads the selected image, and applies it as the new artwork. */
     const handleChangeArtwork = useCallback(async () => {
-        const path = await window.api.localSettings.openFileSelector({
-            filters: [{ extensions: ['jpg', 'jpeg', 'png', 'gif', 'webp'], name: 'Images' }],
-        });
-        if (!path) return;
-        const result = await utils.readLocalImage(path);
-        if (result.success && result.data && result.mimeType) {
-            applyArtworkBytes(base64ToBytes(result.data), result.mimeType);
+        const grant = await window.api.files.selectAndAuthorize('image', [
+            { extensions: ['jpg', 'jpeg', 'png', 'gif', 'webp'], name: 'Images' },
+        ]);
+        if (!grant) return;
+
+        try {
+            const result = await utils.readLocalImage(grant.grantId);
+            if (result.success && result.data && result.mimeType) {
+                applyArtworkBytes(base64ToBytes(result.data), result.mimeType);
+            }
+        } finally {
+            void window.api.files.releaseGrant(grant.grantId);
         }
     }, [applyArtworkBytes, utils]);
+
+    /** Binds dropped artwork files through the same preload-resolved grant path. */
+    const handleDroppedArtwork = useCallback(
+        async (file: File) => {
+            const grant = await window.api.files.authorizeDroppedFiles([file], 'image');
+            if (!grant) return;
+
+            try {
+                const result = await utils.readLocalImage(grant.grantId);
+                if (result.success && result.data && result.mimeType) {
+                    applyArtworkBytes(base64ToBytes(result.data), result.mimeType);
+                }
+            } finally {
+                void window.api.files.releaseGrant(grant.grantId);
+            }
+        },
+        [applyArtworkBytes, utils],
+    );
 
     /** Clears the artwork preview and queues a `clear` artwork operation. */
     const handleRemoveArtwork = useCallback(() => {
@@ -454,9 +528,28 @@ export const useMetadataEditor = ({ browser, songs: songsProp, utils }: UseMetad
             const removedKeyList = [...removedKeys];
 
             try {
+                const selectedFiles = audioGrantRef.current;
+                const selectedPaths = paths.map((filePath) => selectedFiles?.paths.get(filePath));
+                if (
+                    !selectedFiles ||
+                    selectedPaths.length === 0 ||
+                    !selectedPaths.every((filePath): filePath is string => filePath !== undefined)
+                ) {
+                    toast.error({
+                        message: t(
+                            'page.itemDetail.fileAccessDenied',
+                            'Local file access was not authorized for tag editing',
+                        ),
+                        title: t('error.generalError', 'Error'),
+                    });
+                    setIsSaving(false);
+                    return;
+                }
+
                 const writeResult = await withBatchProgress(utils, setLoadProgress, () =>
                     utils.writeSongTagsBatch(
-                        paths,
+                        selectedFiles.grantId,
+                        selectedPaths,
                         activeEdits,
                         removedKeyList,
                         artworkOp ?? undefined,
@@ -661,6 +754,7 @@ export const useMetadataEditor = ({ browser, songs: songsProp, utils }: UseMetad
         getTagConfig,
         handleAddField,
         handleChangeArtwork,
+        handleDroppedArtwork,
         handleFieldChange,
         handleRemoveArtwork,
         handleRemoveField,

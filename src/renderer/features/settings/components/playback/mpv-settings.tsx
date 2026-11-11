@@ -38,23 +38,14 @@ export const MpvSettings = memo(() => {
 
     const [mpvPath, setMpvPath] = useState('');
 
-    const handleSetMpvPath = async (clear?: boolean) => {
-        if (clear) {
-            localSettings?.set('mpv_path', undefined);
-            setMpvPath('');
-            return;
-        }
+    const handleSelectMpvPath = async () => {
+        const result = await mpvPlayer?.selectBinary();
+        if (result) setMpvPath(result);
+    };
 
-        const result = await localSettings?.openFileSelector();
-
-        if (result === null) {
-            localSettings?.set('mpv_path', undefined);
-            setMpvPath('');
-            return;
-        }
-
-        localSettings?.set('mpv_path', result);
-        setMpvPath(result);
+    const handleClearMpvPath = async () => {
+        const cleared = await mpvPlayer?.clearBinary();
+        if (cleared) setMpvPath('');
     };
 
     useEffect(() => {
@@ -113,19 +104,14 @@ export const MpvSettings = memo(() => {
                         variant="subtle"
                     />
                     <TextInput
-                        onChange={(e) => {
-                            setMpvPath(e.currentTarget.value);
-
-                            // Transform backslashes to forward slashes
-                            const transformedValue = e.currentTarget.value.replace(/\\/g, '/');
-                            localSettings?.set('mpv_path', transformedValue);
-                        }}
-                        onClick={() => handleSetMpvPath()}
+                        onClick={handleSelectMpvPath}
+                        placeholder={t('setting.selectMpvExecutable')}
+                        readOnly
                         rightSection={
                             mpvPath && (
                                 <ActionIcon
                                     icon="x"
-                                    onClick={() => handleSetMpvPath(true)}
+                                    onClick={handleClearMpvPath}
                                     variant="transparent"
                                 />
                             )

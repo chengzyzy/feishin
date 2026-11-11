@@ -1,0 +1,44 @@
+# Local-only macOS arm64 package. The base config owns files, hooks and publish
+# metadata; this file changes only the app identity and target matrix.
+extends: ./electron-builder.yml
+
+appId: io.github.chengzyzy.feishin.local
+productName: Feishin Local
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+electronVersion: 43.8.8
+
+directories:
+    buildResources: assets
+    output: dist
+
+# Keep the local package off the upstream update feed and Release path.
+publish: []
+
+extraMetadata:
+    name: feishin-local
+    productName: Feishin Local
+
+# electron-builder deep-merges target arrays from the base config; the workflow
+# passes --arm64, so only the arm64 target is produced.
+mac:
+    target:
+        - target: dmg
+          arch:
+              - arm64
+        - target: zip
+          arch:
+              - arm64
+    icon: media/feishin.icon
+    type: distribution
+    hardenedRuntime: false
+    identity: '-'
+    entitlements: build/entitlements.mac.plist
+    entitlementsInherit: build/entitlements.mac.plist
+    gatekeeperAssess: false
+    notarize: false
+    extendInfo:
+        NSAudioCaptureUsageDescription: 'System audio access is required for mpv visualizer capture in Feishin Local'
+        NSLocalNetworkUsageDescription: 'Local network is necessary for accessing servers hosted on the same system as Feishin Local'
+
+dmg:
+    contents: [{ x: 130, y: 220 }, { x: 410, y: 220, type: link, path: /Applications }]

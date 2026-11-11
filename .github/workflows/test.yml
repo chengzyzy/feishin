@@ -13,11 +13,20 @@ jobs:
             - name: Install Node.js and PNPM
               uses: pnpm/action-setup@v4
 
+            - name: Install Node.js
+              uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+              with:
+                  node-version: '24.22.2'
+                  cache: pnpm
+
             - name: Install dependencies
               run: pnpm install
 
             - name: Lint Files
               run: pnpm run lint
+
+            - name: Security regression
+              run: pnpm run test:security
 
     commitlint:
         runs-on: ubuntu-latest

@@ -67,16 +67,6 @@ export const useSyncSettingsToMain = () => {
                     rendererValue: settings.window.minimizeToTray,
                 },
                 {
-                    mainStoreKey: 'disable_auto_updates',
-                    rendererValue: settings.window.disableAutoUpdate,
-                },
-                // For some reason after the application is updated, the release channel from the
-                // renderer is always set to the latest channel. This causes an infinite update loop
-                // {
-                //     mainStoreKey: 'release_channel',
-                //     rendererValue: settings.window.releaseChannel,
-                // },
-                {
                     mainStoreKey: 'window_enable_tray',
                     rendererValue: settings.window.tray,
                 },
@@ -99,10 +89,6 @@ export const useSyncSettingsToMain = () => {
                 {
                     mainStoreKey: 'enableNeteaseTranslation',
                     rendererValue: settings.lyrics.enableNeteaseTranslation,
-                },
-                {
-                    mainStoreKey: 'local_font_path',
-                    rendererValue: settings.font.custom,
                 },
             ];
 

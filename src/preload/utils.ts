@@ -9,7 +9,7 @@ import type {
     WriteSongTagsBatchResult,
 } from '../shared/types/tag-editor';
 
-import { disableAutoUpdates, isLinux, isMacOS, isWindows } from '../main/env';
+import { isLinux, isMacOS, isWindows } from '../main/env';
 
 const openItem = async (path: string) => {
     return ipcRenderer.invoke('open-item', path);
@@ -19,17 +19,25 @@ const cancelReadSongMetadata = (): void => {
     ipcRenderer.invoke('cancel-read-song-metadata');
 };
 
-const readSongMetadataBatch = (filePaths: string[]): Promise<ReadSongMetadataBatchResult> => {
-    return ipcRenderer.invoke('read-song-metadata-batch', filePaths);
+const readSongMetadataBatch = (grantId: string): Promise<ReadSongMetadataBatchResult> => {
+    return ipcRenderer.invoke('read-song-metadata-batch', grantId);
 };
 
 const writeSongTagsBatch = (
+    grantId: string,
     filePaths: string[],
     edits: Record<string, TagValue>,
     removed: string[],
     artworkOp?: ArtworkOp,
 ): Promise<WriteSongTagsBatchResult> => {
-    return ipcRenderer.invoke('write-song-tags-batch', filePaths, edits, removed, artworkOp);
+    return ipcRenderer.invoke(
+        'write-song-tags-batch',
+        grantId,
+        filePaths,
+        edits,
+        removed,
+        artworkOp,
+    );
 };
 
 const onBatchProgress = (cb: (event: IpcRendererEvent, data: BatchProgress) => void) => {
@@ -40,8 +48,8 @@ const offBatchProgress = (cb: (event: IpcRendererEvent, data: BatchProgress) => 
     ipcRenderer.removeListener('batch-progress', cb);
 };
 
-const readLocalImage = (filePath: string): Promise<ReadLocalImageResult> => {
-    return ipcRenderer.invoke('read-local-image', filePath);
+const readLocalImage = (grantId: string): Promise<ReadLocalImageResult> => {
+    return ipcRenderer.invoke('read-local-image', grantId);
 };
 
 const openApplicationDirectory = async () => {
@@ -104,10 +112,6 @@ const download = (url: string) => {
     ipcRenderer.send('download-url', url);
 };
 
-const checkForUpdates = (): Promise<{ updateAvailable: boolean; version?: string }> => {
-    return ipcRenderer.invoke('app-check-for-updates');
-};
-
 const startPowerSaveBlocker = (full: boolean) => {
     return ipcRenderer.invoke('power-save-blocker-start', { full });
 };
@@ -166,15 +170,9 @@ const rendererOpenReleaseNotes = (cb: () => void) => {
     ipcRenderer.on('renderer-open-release-notes', () => cb());
 };
 
-const rendererUpdateAvailable = (cb: (version: string) => void) => {
-    ipcRenderer.on('update-available', (_, version) => cb(version));
-};
-
 export const utils = {
     cancelReadSongMetadata,
-    checkForUpdates,
     customCssUpdatedListener,
-    disableAutoUpdates,
     download,
     exportDiagnostics,
     forceGarbageCollection,
@@ -199,7 +197,6 @@ export const utils = {
     rendererOpenSettings,
     rendererTogglePrivateMode,
     rendererToggleSidebar,
-    rendererUpdateAvailable,
     saveCustomCss,
     separator: isWindows() ? '\\' : '/',
     setInputFocused,

@@ -8,6 +8,7 @@ import path from 'node:path';
 import util from 'node:util';
 
 import { createZipBuffer } from '/@/main/utils/zip';
+import { sanitizeLogText } from '/@/shared/utils/log-redaction';
 import { sanitizeForDiagnostics } from '/@/shared/utils/sanitize-for-diagnostics';
 
 export type { LogLevel };
@@ -139,7 +140,6 @@ const exportDiagnosticsArchive = async (payload: ExportDiagnosticsPayload = {}) 
         settings: {
             ignoreCors: store.get('ignore_cors'),
             ignoreSsl: store.get('ignore_ssl'),
-            releaseChannel: store.get('release_channel'),
         },
     };
 
@@ -180,7 +180,10 @@ const exportDiagnosticsArchive = async (payload: ExportDiagnosticsPayload = {}) 
             }
             const filePath = path.join(logsDir, fileName);
             const data = await fs.readFile(filePath);
-            entries.push({ data, name: `logs/${fileName}` });
+            entries.push({
+                data: Buffer.from(sanitizeLogText(data.toString('utf8')), 'utf8'),
+                name: `logs/${fileName}`,
+            });
         }
     } catch (error) {
         log.warn('Failed to read log files for export', error);
@@ -188,8 +191,9 @@ const exportDiagnosticsArchive = async (payload: ExportDiagnosticsPayload = {}) 
 
     if (!entries.some((entry) => entry.name.startsWith('logs/'))) {
         try {
+            const data = await fs.readFile(logFile.path);
             entries.push({
-                data: await fs.readFile(logFile.path),
+                data: Buffer.from(sanitizeLogText(data.toString('utf8')), 'utf8'),
                 name: `logs/${path.basename(logFile.path)}`,
             });
         } catch (error) {
@@ -209,21 +213,3 @@ ipcMain.handle('logger-export-diagnostics', async (_event, payload?: ExportDiagn
 });
 
 export default log;
-
-export const autoUpdaterLogInterface = {
-    debug: (message: string) => {
-        log.debug(message);
-    },
-
-    error: (message: string) => {
-        log.error(message);
-    },
-
-    info: (message: string) => {
-        log.info(message);
-    },
-
-    warn: (message: string) => {
-        log.warn(message);
-    },
-};

@@ -3,9 +3,9 @@ import { Fragment, ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate } from 'react-router';
 
+import packageJson from '../../../../../package.json';
 import styles from './app-menu.module.css';
 
-import { UpdateAvailableButton } from '/@/renderer/features/settings/components/update-available-button';
 import { openSettingsModal } from '/@/renderer/features/settings/utils/open-settings-modal';
 import { ServerSelector } from '/@/renderer/features/sidebar/components/server-selector';
 import { openReleaseNotesModal } from '/@/renderer/release-notes-modal';
@@ -15,12 +15,10 @@ import {
     useCommandPalette,
     useCurrentServer,
     useGeneralSettings,
-    useLatestVersion,
     useSettingsStoreActions,
 } from '/@/renderer/store';
 import { ActionIcon } from '/@/shared/components/action-icon/action-icon';
 import { DropdownMenu, MenuItemProps } from '/@/shared/components/dropdown-menu/dropdown-menu';
-import { Flex } from '/@/shared/components/flex/flex';
 import { Group } from '/@/shared/components/group/group';
 import { Icon } from '/@/shared/components/icon/icon';
 import { toast } from '/@/shared/components/toast/toast';
@@ -130,7 +128,7 @@ export const AppMenu = () => {
         });
     };
 
-    const { currentVersion } = useLatestVersion();
+    const currentVersion = packageJson.version;
 
     const serverHeaderMenuItems: MenuItem[] = currentServer
         ? [
@@ -279,15 +277,6 @@ export const AppMenu = () => {
                 type: 'item',
             },
             type: 'conditional-item',
-        },
-        {
-            component: (
-                <Flex align="center" justify="center" w="100%">
-                    <UpdateAvailableButton />
-                </Flex>
-            ),
-            id: 'update-available',
-            type: 'custom',
         },
         {
             condition: settings.sideQueueType === 'sideQueue',

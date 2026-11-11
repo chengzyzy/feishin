@@ -1,4 +1,4 @@
-import { ipcRenderer, OpenDialogOptions, webFrame } from 'electron';
+import { ipcRenderer, webFrame } from 'electron';
 
 import { TitleTheme } from '/@/shared/types/types';
 
@@ -56,9 +56,12 @@ const themeSet = (theme: TitleTheme): void => {
     ipcRenderer.send('theme-set', theme);
 };
 
-const openFileSelector = async (options?: OpenDialogOptions) => {
-    const result = await ipcRenderer.invoke('open-file-selector', options);
-    return result;
+const selectFontFile = (): Promise<null | string> => {
+    return ipcRenderer.invoke('font-select-file');
+};
+
+const clearFontFile = (): Promise<boolean> => {
+    return ipcRenderer.invoke('font-clear-file');
 };
 
 export const toServerType = (value?: string): null | string => {
@@ -95,16 +98,17 @@ get('maximized').then((value) => {
 });
 
 export const localSettings = {
+    clearFontFile,
     disableMediaKeys,
     enableMediaKeys,
     env,
     fontError,
     get,
-    openFileSelector,
     passwordGet,
     passwordRemove,
     passwordSet,
     restart,
+    selectFontFile,
     set,
     setSync,
     setZoomFactor,

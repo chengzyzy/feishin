@@ -1,18 +1,18 @@
 import type { FSWatcher } from 'fs';
 
-import {
-    app,
-    BrowserWindow,
-    dialog,
-    ipcMain,
-    nativeTheme,
-    OpenDialogOptions,
-    safeStorage,
-    shell,
-} from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, safeStorage, shell } from 'electron';
 import Store from 'electron-store';
 import { promises as fs, watch as fsWatch } from 'fs';
 import path from 'path';
+
+import { isTrustedIpcSender } from '../../../index';
+import { validateReadableFile } from '../../../security/file-policy';
+import {
+    isAllowedSettingsKey,
+    isValidServerId,
+    isValidStoredPassword,
+    validateSettingsWrite,
+} from '../../../security/ipc-policy';
 
 import log from '/@/main/logger';
 import { Platform, type TitleTheme } from '/@/shared/types/types';
@@ -106,7 +106,6 @@ export const store = new Store<any>({
     },
     cwd: storePath,
     defaults: {
-        disable_auto_updates: false,
         enableNeteaseTranslation: false,
         global_media_hotkeys: true,
         lyrics: ['NetEase', 'lrclib.net'],
@@ -131,27 +130,61 @@ export const store = new Store<any>({
     },
 });
 
-ipcMain.handle('settings-get', (_event, data: { property: string }) => {
-    return store.get(`${data.property}`);
+ipcMain.handle('settings-get', (event, data: { property: string }) => {
+    if (!isTrustedIpcSender(event)) return undefined;
+    if (!data || typeof data.property !== 'string' || data.property === 'server') return undefined;
+    return store.get(data.property);
 });
 
-ipcMain.on('settings-set', (__event, data: { property: string; value: any }) => {
-    if (data.value === undefined) {
-        store.delete(data.property);
-    } else {
-        store.set(data.property, data.value);
+ipcMain.on('settings-set', (event, data: { property: string; value: any }) => {
+    if (!isTrustedIpcSender(event)) return;
+
+    // Preserve the original "undefined deletes" semantics, but only for keys the
+    // renderer is allowed to own.
+    if (data?.value === undefined) {
+        if (!isAllowedSettingsKey(data?.property)) {
+            log.warn('Rejected settings delete', { reason: 'protected-property' });
+            return;
+        }
+        store.delete(data!.property);
+        return;
     }
-});
 
-ipcMain.handle('settings-set-sync', (__event, data: { property: string; value: any }) => {
-    if (data.value === null) {
-        store.delete(data.property);
-    } else {
-        store.set(data.property, data.value);
+    const decision = validateSettingsWrite(data?.property, data?.value);
+    if (!decision.ok) {
+        log.warn('Rejected settings write', { reason: decision.reason });
+        return;
     }
+
+    store.set(data.property, decision.value);
 });
 
-ipcMain.handle('password-get', (_event, server: string): null | string => {
+ipcMain.handle('settings-set-sync', (event, data: { property: string; value: any }) => {
+    if (!isTrustedIpcSender(event)) return false;
+
+    if (data?.value === null) {
+        if (!isAllowedSettingsKey(data?.property)) {
+            log.warn('Rejected settings delete', { reason: 'protected-property' });
+            return false;
+        }
+        store.delete(data!.property);
+        return true;
+    }
+
+    const decision = validateSettingsWrite(data?.property, data?.value);
+    if (!decision.ok) {
+        log.warn('Rejected settings write', { reason: decision.reason });
+        return false;
+    }
+
+    store.set(data.property, decision.value);
+    return true;
+});
+
+ipcMain.handle('password-get', (event, server: string): null | string => {
+    if (!isTrustedIpcSender(event)) return null;
+    if (!isValidServerId(server)) return null;
+
     if (safeStorage.isEncryptionAvailable()) {
         const servers = store.get('server') as Record<string, string> | undefined;
 
@@ -170,7 +203,9 @@ ipcMain.handle('password-get', (_event, server: string): null | string => {
     return null;
 });
 
-ipcMain.on('password-remove', (_event, server: string) => {
+ipcMain.on('password-remove', (event, server: string) => {
+    if (!isTrustedIpcSender(event) || !isValidServerId(server)) return;
+
     const passwords = store.get('server', {}) as Record<string, string>;
     if (server in passwords) {
         delete passwords[server];
@@ -179,7 +214,10 @@ ipcMain.on('password-remove', (_event, server: string) => {
     log.info('Password removed', { serverId: server });
 });
 
-ipcMain.handle('password-set', (_event, password: string, server: string) => {
+ipcMain.handle('password-set', (event, password: string, server: string) => {
+    if (!isTrustedIpcSender(event)) return false;
+    if (!isValidServerId(server) || !isValidStoredPassword(password)) return false;
+
     if (safeStorage.isEncryptionAvailable()) {
         const encrypted = safeStorage.encryptString(password);
         const passwords = store.get('server', {}) as Record<string, string>;
@@ -194,21 +232,45 @@ ipcMain.handle('password-set', (_event, password: string, server: string) => {
     return false;
 });
 
-ipcMain.on('theme-set', (_event, theme: TitleTheme) => {
+const TITLE_THEME_VALUES: TitleTheme[] = ['dark', 'light', 'system'];
+
+ipcMain.on('theme-set', (event, theme: TitleTheme) => {
+    if (!isTrustedIpcSender(event)) return;
+    if (!TITLE_THEME_VALUES.includes(theme)) return;
+
     store.set('theme', theme);
     nativeTheme.themeSource = theme;
 });
 
-ipcMain.handle('open-file-selector', async (_event, options: OpenDialogOptions) => {
+ipcMain.handle('font-select-file', async (event) => {
+    if (!isTrustedIpcSender(event)) return null;
+
     const result = await dialog.showOpenDialog({
-        ...options,
+        filters: [{ extensions: ['otf', 'ttc', 'ttf', 'woff', 'woff2'], name: 'Fonts' }],
         properties: ['openFile'],
     });
 
-    return result.filePaths[0] || null;
+    const selectedPath = result.filePaths[0];
+    if (result.canceled || !selectedPath) return null;
+
+    const validated = await validateReadableFile(selectedPath, 'font');
+    if (!validated.ok || !validated.paths?.[0]) {
+        log.warn('Rejected custom font selection', { reason: validated.reason });
+        return null;
+    }
+
+    store.set('local_font_path', validated.paths[0]);
+    return validated.paths[0];
 });
 
-ipcMain.handle('custom-css-get', async () => {
+ipcMain.handle('font-clear-file', (event) => {
+    if (!isTrustedIpcSender(event)) return false;
+    store.delete('local_font_path');
+    return true;
+});
+
+ipcMain.handle('custom-css-get', async (event) => {
+    if (!isTrustedIpcSender(event)) return null;
     const { content, exists } = await readCustomCss();
     return {
         content,
@@ -217,15 +279,22 @@ ipcMain.handle('custom-css-get', async () => {
     };
 });
 
-ipcMain.handle('custom-css-save', async (_event, data: { content: string }) => {
+ipcMain.handle('custom-css-save', async (event, data: { content: string }) => {
+    if (!isTrustedIpcSender(event)) return false;
     const content = typeof data?.content === 'string' ? data.content : '';
+    if (content.length > 1024 * 1024) {
+        log.warn('Rejected custom CSS larger than 1 MiB');
+        return false;
+    }
+
     await fs.mkdir(storePath, { recursive: true });
     await fs.writeFile(customCssPath, content, 'utf8');
     await notifyCustomCssUpdate();
     return true;
 });
 
-ipcMain.handle('custom-css-open-folder', async () => {
+ipcMain.handle('custom-css-open-folder', async (event) => {
+    if (!isTrustedIpcSender(event)) return false;
     await fs.mkdir(storePath, { recursive: true });
     await shell.openPath(storePath);
     return true;

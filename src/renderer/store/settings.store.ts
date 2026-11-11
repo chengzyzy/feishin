@@ -734,12 +734,10 @@ const RemoteSettingsSchema = z.object({
 });
 
 const WindowSettingsSchema = z.object({
-    disableAutoUpdate: z.boolean(),
     exitToTray: z.boolean(),
     minimizeToTray: z.boolean(),
     preventSleepOnPlayback: z.boolean(),
     preventSuspendOnPlayback: z.boolean(),
-    releaseChannel: z.enum(['alpha', 'beta', 'latest']),
     startMinimized: z.boolean(),
     tray: z.boolean(),
     windowBarStyle: z.nativeEnum(Platform),
@@ -2263,12 +2261,10 @@ const initialState: SettingsState = {
         type: 'audiomotionanalyzer',
     },
     window: {
-        disableAutoUpdate: false,
         exitToTray: false,
         minimizeToTray: false,
         preventSleepOnPlayback: false,
         preventSuspendOnPlayback: false,
-        releaseChannel: 'latest',
         startMinimized: false,
         tray: true,
         windowBarStyle: platformDefaultWindowBarStyle,
@@ -2455,10 +2451,6 @@ export const useSettingsStore = createWithEqualityFn<SettingsSlice>()(
                 }
 
                 if (version <= 9) {
-                    if (!state.window.releaseChannel) {
-                        state.window.releaseChannel = initialState.window.releaseChannel;
-                    }
-
                     if (!state.playback.mediaSession) {
                         state.playback.mediaSession = initialState.playback.mediaSession;
                     }
@@ -2544,12 +2536,6 @@ export const useSettingsStore = createWithEqualityFn<SettingsSlice>()(
                         label: i18n.t('page.sidebar.radio'),
                         route: AppRoute.RADIO,
                     });
-                }
-
-                // Version 16 introduced a bug where the release channel may have been reset
-                // to the latest channel. This is to revert it.
-                if (version === 16) {
-                    state.window.releaseChannel = 'beta';
                 }
 
                 if (version <= 17) {

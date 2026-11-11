@@ -1,12 +1,13 @@
-import { app, ipcMain, powerMonitor } from 'electron';
+import { app, dialog, ipcMain, powerMonitor } from 'electron';
 import { access, rm } from 'fs/promises';
 import uniq from 'lodash/uniq';
 import MpvAPI from 'node-mpv';
 import { pid } from 'node:process';
 import process from 'process';
 
-import { getMainWindow, sendToastToRenderer } from '../../../index';
+import { getMainWindow, isTrustedIpcSender, sendToastToRenderer } from '../../../index';
 import log from '../../../logger';
+import { validateExecutableFile } from '../../../security/file-policy';
 import { store } from '../settings';
 
 import { isMacOS, isWindows } from '/@/main/env';
@@ -92,7 +93,6 @@ const mpvLog = (
     }
 };
 
-const MPV_BINARY_PATH = store.get('mpv_path') as string | undefined;
 const MACOS_MPV_BINARY_PATHS = ['/opt/homebrew/bin/mpv', '/usr/local/bin/mpv'];
 
 const prefetchPlaylistParams = [
@@ -124,13 +124,15 @@ const DEFAULT_MPV_PARAMETERS = (extraParameters?: string[]) => {
     return parameters;
 };
 
-const resolveMpvBinaryPath = async (binaryPath?: string) => {
-    if (binaryPath) {
-        return binaryPath;
-    }
+const resolveMpvBinaryPath = async () => {
+    const storedBinaryPath = store.get('mpv_path') as string | undefined;
+    if (storedBinaryPath) {
+        const validated = await validateExecutableFile(storedBinaryPath);
+        if (validated.ok && validated.paths?.[0]) {
+            return validated.paths[0];
+        }
 
-    if (MPV_BINARY_PATH) {
-        return MPV_BINARY_PATH;
+        log.warn('Configured mpv executable is no longer valid');
     }
 
     if (!isMacOS()) {
@@ -150,12 +152,11 @@ const resolveMpvBinaryPath = async (binaryPath?: string) => {
 };
 
 const createMpv = async (data: {
-    binaryPath?: string;
     extraParameters?: string[];
     properties?: Record<string, any>;
 }): Promise<MpvAPI> => {
-    const { binaryPath, extraParameters, properties } = data;
-    const resolvedBinaryPath = await resolveMpvBinaryPath(binaryPath);
+    const { extraParameters, properties } = data;
+    const resolvedBinaryPath = await resolveMpvBinaryPath();
     const normalizedExtraParameters = (extraParameters ?? [])
         .map((param) => param.trim())
         .filter((param) => param.length > 0);
@@ -326,9 +327,37 @@ ipcMain.on('player-set-properties', async (_event, data: Record<string, any>) =>
     }
 });
 
+ipcMain.handle('mpv-select-binary', async (event) => {
+    if (!isTrustedIpcSender(event)) return null;
+
+    const result = await dialog.showOpenDialog({
+        properties: ['openFile'],
+        title: 'Select mpv executable',
+    });
+
+    const selectedPath = result.filePaths[0];
+    if (result.canceled || !selectedPath) return null;
+
+    const validated = await validateExecutableFile(selectedPath);
+    if (!validated.ok || !validated.paths?.[0]) {
+        log.warn('Rejected mpv executable selection', { reason: validated.reason });
+        return null;
+    }
+
+    store.set('mpv_path', validated.paths[0]);
+    return validated.paths[0];
+});
+
+ipcMain.handle('mpv-clear-binary', (event) => {
+    if (!isTrustedIpcSender(event)) return false;
+    store.delete('mpv_path');
+    return true;
+});
+
 ipcMain.handle(
     'player-restart',
-    async (_event, data: { extraParameters?: string[]; properties?: Record<string, any> }) => {
+    async (event, data: { extraParameters?: string[]; properties?: Record<string, any> }) => {
+        if (!isTrustedIpcSender(event)) return;
         try {
             mpvLog({
                 action: `Attempting to initialize mpv with parameters: ${JSON.stringify(data)}`,
@@ -363,7 +392,8 @@ ipcMain.handle(
 
 ipcMain.handle(
     'player-initialize',
-    async (_event, data: { extraParameters?: string[]; properties?: Record<string, any> }) => {
+    async (event, data: { extraParameters?: string[]; properties?: Record<string, any> }) => {
+        if (!isTrustedIpcSender(event)) return;
         try {
             mpvLog({
                 action: `Attempting to initialize mpv with parameters: ${JSON.stringify(data)}`,
@@ -693,7 +723,8 @@ ipcMain.handle(
 
 ipcMain.handle(
     'player-get-audio-devices',
-    async (): Promise<{ label: string; value: string }[]> => {
+    async (event): Promise<{ label: string; value: string }[]> => {
+        if (!isTrustedIpcSender(event)) return [];
         try {
             // Wait out an in-flight startup so the real instance is reused instead of racing it.
             if (mpvCreatePromise) {

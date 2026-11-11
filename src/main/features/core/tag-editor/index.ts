@@ -7,6 +7,9 @@ import type {
 
 import { ipcMain, type IpcMainInvokeEvent } from 'electron';
 
+import { isTrustedIpcSender } from '../../../index';
+import { fileGrants } from '../../../security/file-grants';
+import { validateGrantedFiles } from '../../../security/file-policy';
 import { readFilesMetadataBatch, readLocalImageFile, writeFilesTags } from './taglib-service';
 
 const sendBatchProgress = (event: IpcMainInvokeEvent, processed: number, total: number) => {
@@ -15,14 +18,29 @@ const sendBatchProgress = (event: IpcMainInvokeEvent, processed: number, total: 
 
 let activeReadController: AbortController | null = null;
 
-ipcMain.handle('cancel-read-song-metadata', () => {
+ipcMain.handle('cancel-read-song-metadata', (event) => {
+    if (!isTrustedIpcSender(event)) return;
     activeReadController?.abort();
     activeReadController = null;
 });
 
 ipcMain.handle(
     'read-song-metadata-batch',
-    async (event, filePaths: string[]): Promise<ReadSongMetadataBatchResult> => {
+    async (event, grantId: unknown): Promise<ReadSongMetadataBatchResult> => {
+        if (!isTrustedIpcSender(event)) {
+            return { artworkKind: 'none', success: false };
+        }
+
+        const grant = fileGrants.resolve(grantId, 'audio', event.sender.id);
+        if (!grant) {
+            return {
+                artworkKind: 'none',
+                error: 'Local audio file access was not authorized',
+                success: false,
+            };
+        }
+        const filePaths = grant.paths;
+
         activeReadController?.abort();
         activeReadController = new AbortController();
         const { signal } = activeReadController;
@@ -78,11 +96,25 @@ ipcMain.handle(
     'write-song-tags-batch',
     async (
         event,
-        filePaths: string[],
+        grantId: unknown,
+        requestedPaths: unknown,
         edits: Record<string, TagValue>,
         removed: string[],
         artworkOp?: ArtworkOp,
     ): Promise<WriteSongTagsBatchResult> => {
+        if (!isTrustedIpcSender(event)) {
+            return { error: 'Untrusted renderer', success: false };
+        }
+
+        const grant = fileGrants.resolve(grantId, 'audio', event.sender.id);
+        if (!grant) {
+            return { error: 'Local audio file access was not authorized', success: false };
+        }
+        const filePaths = await validateGrantedFiles(requestedPaths, grant.paths, 'audio');
+        if (!filePaths) {
+            return { error: 'Selected audio files are outside the grant', success: false };
+        }
+
         try {
             const result = await writeFilesTags(
                 filePaths,
@@ -106,9 +138,18 @@ ipcMain.handle(
     },
 );
 
-ipcMain.handle('read-local-image', async (_event, filePath: string) => {
+ipcMain.handle('read-local-image', async (event, grantId: unknown) => {
+    if (!isTrustedIpcSender(event)) {
+        return { error: 'Untrusted renderer', success: false };
+    }
+
+    const grant = fileGrants.resolve(grantId, 'image', event.sender.id);
+    if (!grant || !grant.paths[0]) {
+        return { error: 'Local image access was not authorized', success: false };
+    }
+
     try {
-        const { data, mimeType } = await readLocalImageFile(filePath);
+        const { data, mimeType } = await readLocalImageFile(grant.paths[0]);
         return { data, mimeType, success: true };
     } catch (err) {
         return { error: String(err), success: false };

@@ -17,7 +17,7 @@ export const openSettingsModal = () => {
                 width: '100%',
             },
         },
-        title: <SettingsHeader showUpdateAvailable />,
+        title: <SettingsHeader />,
         transitionProps: {
             transition: 'pop',
         },

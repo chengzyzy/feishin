@@ -251,8 +251,8 @@ export const SongEditModal = ({ songs }: { songs: Song[] }) => {
                             'Multiple Artworks',
                         )}
                         noArtworkLabel={t('page.itemDetail.noArtwork', 'No Artwork')}
-                        onApplyBytes={editor.applyArtworkBytes}
                         onBrowse={editor.handleChangeArtwork}
+                        onDroppedFile={editor.handleDroppedArtwork}
                         onRemove={editor.handleRemoveArtwork}
                         removeArtworkLabel={t('page.itemDetail.removeArtwork', 'Remove Artwork')}
                         showRemoveButton={editor.showRemoveArtworkButton}

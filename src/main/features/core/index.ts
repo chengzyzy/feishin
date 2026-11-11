@@ -1,5 +1,6 @@
 import './autodiscover';
 import './dlna';
+import './files';
 import './custom-themes';
 import './lyrics';
 import './player';

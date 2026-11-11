@@ -11,8 +11,8 @@ interface ArtworkPanelProps {
     artworkIsMixed: boolean;
     multipleArtworksLabel: string;
     noArtworkLabel: string;
-    onApplyBytes: (bytes: Uint8Array, mimeType: string) => void;
     onBrowse: () => void;
+    onDroppedFile: (file: File) => Promise<void> | void;
     onRemove: () => void;
     removeArtworkLabel: string;
     showRemoveButton: boolean;
@@ -23,8 +23,8 @@ export const ArtworkPanel = ({
     artworkIsMixed,
     multipleArtworksLabel,
     noArtworkLabel,
-    onApplyBytes,
     onBrowse,
+    onDroppedFile,
     onRemove,
     removeArtworkLabel,
     showRemoveButton,
@@ -34,10 +34,7 @@ export const ArtworkPanel = ({
             accept="image/*"
             className={styles.artworkBox}
             mode="file"
-            onFileSelected={async (file) => {
-                const buf = await file.arrayBuffer();
-                onApplyBytes(new Uint8Array(buf), file.type);
-            }}
+            onFileSelected={onDroppedFile}
         >
             {artworkDisplayUrl ? (
                 <img alt="Cover art" className={styles.artworkImage} src={artworkDisplayUrl} />

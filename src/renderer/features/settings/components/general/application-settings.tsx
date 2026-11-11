@@ -27,20 +27,19 @@ import {
     useSettingsStoreActions,
 } from '/@/renderer/store/settings.store';
 import { type Font, FONT_OPTIONS } from '/@/renderer/types/fonts';
-import { FileInput } from '/@/shared/components/file-input/file-input';
+import { ActionIcon } from '/@/shared/components/action-icon/action-icon';
+import { Group } from '/@/shared/components/group/group';
 import { NumberInput } from '/@/shared/components/number-input/number-input';
 import { SegmentedControl } from '/@/shared/components/segmented-control/segmented-control';
 import { Select } from '/@/shared/components/select/select';
 import { Slider } from '/@/shared/components/slider/slider';
 import { Switch } from '/@/shared/components/switch/switch';
+import { TextInput } from '/@/shared/components/text-input/text-input';
 import { toast } from '/@/shared/components/toast/toast';
 import { FontType } from '/@/shared/types/types';
 
 const localSettings = isElectron() ? window.api.localSettings : null;
 const ipc = isElectron() ? window.api.ipc : null;
-const utils = isElectron() ? window.api.utils : null;
-// Electron 32+ removed file.path, use this which is exposed in preload to get real path
-const getPathForFile = isElectron() ? window.api.getPathForFile : null;
 
 const HOME_FEATURE_STYLE_OPTIONS = [
     {
@@ -143,6 +142,32 @@ export const ApplicationSettings = memo(() => {
     const fontSettings = useFontSettings();
     const { setSettings } = useSettingsStoreActions();
     const [localFonts, setLocalFonts] = useState<Font[]>([]);
+
+    const customFontLabel = fontSettings.custom
+        ? fontSettings.custom.split(/[\\/]/).pop() || fontSettings.custom
+        : '';
+
+    const handleSelectCustomFont = async () => {
+        const selectedPath = await localSettings?.selectFontFile();
+        if (!selectedPath) return;
+        setSettings({
+            font: {
+                ...fontSettings,
+                custom: selectedPath,
+            },
+        });
+    };
+
+    const handleClearCustomFont = async () => {
+        const cleared = await localSettings?.clearFontFile();
+        if (!cleared) return;
+        setSettings({
+            font: {
+                ...fontSettings,
+                custom: null,
+            },
+        });
+    };
 
     // const fontList = useMemo(() => {
     //     if (fontSettings.custom) {
@@ -317,26 +342,24 @@ export const ApplicationSettings = memo(() => {
         },
         {
             control: (
-                <FileInput
-                    accept=".ttc,.ttf,.otf,.woff,.woff2"
-                    clearable
-                    defaultValue={
-                        fontSettings.custom
-                            ? new File([], fontSettings.custom.split(utils?.separator || '').pop()!)
-                            : null
-                    }
-                    onChange={async (e) => {
-                        const custom = e ? getPathForFile?.(e) || null : null;
-                        await localSettings?.setSync('local_font_path', custom);
-                        setSettings({
-                            font: {
-                                ...fontSettings,
-                                custom,
-                            },
-                        });
-                    }}
-                    w={300}
-                />
+                <Group gap="sm">
+                    <TextInput
+                        onClick={handleSelectCustomFont}
+                        placeholder={t('setting.selectCustomFont')}
+                        readOnly
+                        rightSection={
+                            fontSettings.custom ? (
+                                <ActionIcon
+                                    icon="x"
+                                    onClick={handleClearCustomFont}
+                                    variant="transparent"
+                                />
+                            ) : null
+                        }
+                        value={customFontLabel}
+                        width={300}
+                    />
+                </Group>
             ),
             description: t('setting.customFontPath', {
                 context: 'description',

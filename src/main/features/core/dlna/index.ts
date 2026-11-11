@@ -13,7 +13,25 @@ import http from 'http';
 import os from 'os';
 import path from 'path';
 
-import { getMainWindow } from '../../../index';
+import { getMainWindow, isTrustedIpcSender } from '../../../index';
+import {
+    activatePendingSubscription,
+    clearPendingSubscription,
+    type DlnaNotifyKind,
+    type DlnaPendingSubscription,
+    type DlnaSubscription,
+    isAllowedNotifySource,
+    isNotifyBodyWithinLimit,
+    isPendingSubscriptionCandidate,
+    isSupportedNotifyPath,
+    isValidNotifySequence,
+    isValidNotifySid,
+    resolveHostAddresses,
+    rotateSubscriptionSid,
+    setPendingSubscription,
+} from '../../../security/dlna-events';
+import { isAllowedServedTempPath } from '../../../security/file-policy';
+import { isHttpUrl } from '../../../security/ipc-policy';
 import {
     becomeCoordinatorOfStandaloneGroup,
     clearNextAVTransportURI,
@@ -50,6 +68,7 @@ import {
 import { discoverDevices } from './ssdp-discovery';
 
 import log from '/@/main/logger';
+import { summarizeUrlForLog } from '/@/shared/utils/log-redaction';
 
 let connectedDevice: DlnaDevice | null = null;
 let currentCoordinatorId = '';
@@ -131,6 +150,8 @@ let isPausedIntentionally = false;
 let currentFfmpegProcess: ChildProcess | null = null;
 let currentTranscodeFile = '';
 const servedTempFiles = new Set<string>();
+const activeSubscriptions = new Map<string, DlnaSubscription>();
+const pendingSubscriptions = new Map<DlnaNotifyKind, DlnaPendingSubscription>();
 let lastKnownDuration = 0;
 let nearEndStallCount = 0;
 let resumeKickCount = 0;
@@ -422,17 +443,31 @@ async function enrichDevicesWithTopology(devices: DlnaDevice[]): Promise<DlnaDev
 async function ensureEventServer(): Promise<void> {
     if (eventServer) return;
     eventServer = http.createServer((req, res) => {
-        const isFileServe = req.url?.startsWith('/serve-temp');
+        let requestUrl: URL;
+        try {
+            requestUrl = new URL(req.url ?? '/', 'http://localhost');
+        } catch {
+            res.writeHead(400);
+            res.end();
+            return;
+        }
+        const isFileServe = requestUrl.pathname === '/serve-temp';
         if (
             isFileServe &&
             (req.method === 'GET' || req.method === 'HEAD') &&
             req.url != undefined
         ) {
             try {
-                const qs = new URLSearchParams(req.url.split('?')[1] ?? '');
-                const filePath = qs.get('path');
+                const filePath = requestUrl.searchParams.get('path');
                 const resolvedPath = filePath ? path.resolve(filePath) : '';
-                if (!resolvedPath || !servedTempFiles.has(resolvedPath)) {
+                if (
+                    !resolvedPath ||
+                    !isAllowedServedTempPath(
+                        resolvedPath,
+                        path.resolve(os.tmpdir()),
+                        servedTempFiles,
+                    )
+                ) {
                     res.writeHead(403);
                     return res.end();
                 }
@@ -460,6 +495,15 @@ async function ensureEventServer(): Promise<void> {
                     const parts = range.replace(/bytes=/, '').split('-');
                     const start = parseInt(parts[0], 10);
                     const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+                    if (
+                        !Number.isInteger(start) ||
+                        !Number.isInteger(end) ||
+                        start < 0 ||
+                        end < start
+                    ) {
+                        res.writeHead(416);
+                        return res.end();
+                    }
                     const chunksize = end - start + 1;
                     const file = createReadStream(resolvedPath, { end, start });
                     res.writeHead(206, {
@@ -486,18 +530,98 @@ async function ensureEventServer(): Promise<void> {
             }
             return;
         }
-        if (req.method !== 'NOTIFY') {
-            res.writeHead(405);
+
+        const notifyKind = isSupportedNotifyPath(requestUrl.pathname);
+        if (req.method !== 'NOTIFY' || !notifyKind) {
+            res.writeHead(req.method === 'NOTIFY' ? 404 : 405);
             res.end();
             return;
         }
-        let body = '';
-        req.on('data', (chunk) => (body += chunk.toString()));
-        req.on('end', () => {
-            res.writeHead(200);
+
+        const sid = req.headers.sid;
+        const sequence = req.headers.seq;
+        if (!isValidNotifySid(sid) || !isValidNotifySequence(sequence)) {
+            res.writeHead(400);
             res.end();
-            if (req.url === '/topology') handleTopologyNotify(body);
-            else handleEventNotify(body);
+            return;
+        }
+
+        const subscription = activeSubscriptions.get(sid);
+        const pending = subscription ? undefined : pendingSubscriptions.get(notifyKind);
+        if (subscription) {
+            if (subscription.kind !== notifyKind) {
+                res.writeHead(412);
+                res.end();
+                return;
+            }
+            if (!isAllowedNotifySource(req.socket.remoteAddress, subscription.addresses)) {
+                dlnaLog('Rejected event notification from unexpected source');
+                res.writeHead(403);
+                res.end();
+                return;
+            }
+        } else if (
+            !pending ||
+            !isPendingSubscriptionCandidate(
+                pendingSubscriptions,
+                notifyKind,
+                req.socket.remoteAddress,
+                sequence,
+            )
+        ) {
+            dlnaLog('Rejected event notification with unknown subscription');
+            res.writeHead(412);
+            res.end();
+            return;
+        }
+
+        const chunks: Buffer[] = [];
+        let receivedBytes = 0;
+        let rejectedForSize = false;
+        req.on('data', (chunk: Buffer) => {
+            if (rejectedForSize) return;
+            receivedBytes += chunk.length;
+            if (!isNotifyBodyWithinLimit(receivedBytes)) {
+                rejectedForSize = true;
+                res.writeHead(413, { Connection: 'close' });
+                res.end(() => req.destroy());
+                return;
+            }
+            chunks.push(chunk);
+        });
+        req.on('end', () => {
+            if (rejectedForSize) return;
+            const body = Buffer.concat(chunks, receivedBytes).toString('utf8');
+            const confirmed = activeSubscriptions.get(sid);
+            if (
+                confirmed?.kind === notifyKind &&
+                isAllowedNotifySource(req.socket.remoteAddress, confirmed.addresses)
+            ) {
+                res.writeHead(200);
+                res.end();
+                if (notifyKind === 'topology') handleTopologyNotify(body);
+                else handleEventNotify(body);
+                return;
+            }
+            if (
+                pending &&
+                pendingSubscriptions.get(notifyKind) === pending &&
+                isPendingSubscriptionCandidate(
+                    pendingSubscriptions,
+                    notifyKind,
+                    req.socket.remoteAddress,
+                    sequence,
+                ) &&
+                (!pending.initialNotification || pending.initialNotification.sid === sid)
+            ) {
+                // A device can send its initial event before returning the subscription SID.
+                pending.initialNotification ??= { body, sid };
+                res.writeHead(200);
+                res.end();
+                return;
+            }
+            res.writeHead(412);
+            res.end();
         });
         return;
     });
@@ -627,6 +751,8 @@ async function fullDisconnect(): Promise<void> {
         eventServer = null;
         eventServerPort = 0;
     }
+    activeSubscriptions.clear();
+    pendingSubscriptions.clear();
     cleanupTempFiles();
 }
 
@@ -863,6 +989,8 @@ async function passiveDisconnect(): Promise<void> {
         eventServer = null;
         eventServerPort = 0;
     }
+    activeSubscriptions.clear();
+    pendingSubscriptions.clear();
     cleanupTempFiles();
 }
 
@@ -908,27 +1036,53 @@ function refreshTopology() {
 }
 
 async function renewEventSubscription(device: DlnaDevice): Promise<void> {
-    if (!subscriptionSid) return;
+    const currentSid = subscriptionSid;
+    if (!currentSid) return;
+
+    const currentSubscription = activeSubscriptions.get(currentSid);
+    let addresses = currentSubscription?.addresses ?? [];
+
     try {
         const parsedUrl = new URL(getEventUrl(device));
-        await new Promise<void>((resolve, reject) => {
+        if (addresses.length === 0) {
+            addresses = await resolveHostAddresses(parsedUrl.hostname);
+        }
+
+        const renewedSid = await new Promise<string>((resolve, reject) => {
             const req = http.request(
                 {
-                    headers: { SID: subscriptionSid!, TIMEOUT: 'Second-1800' },
+                    headers: { SID: currentSid, TIMEOUT: 'Second-1800' },
                     hostname: parsedUrl.hostname,
                     method: 'SUBSCRIBE',
                     path: parsedUrl.pathname,
                     port: parsedUrl.port || '1400',
                 },
                 (res) => {
+                    const sid = res.headers.sid ?? currentSid;
+                    const status = res.statusCode ?? 0;
                     res.resume();
-                    resolve();
+                    if (status >= 200 && status < 300 && isValidNotifySid(sid)) resolve(sid);
+                    else reject(new Error('Invalid AVTransport renewal response'));
                 },
             );
             req.on('error', reject);
             req.setTimeout(5000, () => req.destroy(new Error('Renewal timed out')));
             req.end();
         });
+
+        if (subscriptionSid !== currentSid) return;
+        if (renewedSid !== currentSid) {
+            rotateSubscriptionSid(
+                activeSubscriptions,
+                currentSid,
+                renewedSid,
+                'avtransport',
+                addresses,
+            );
+            subscriptionSid = renewedSid;
+            dlnaLog('AVTransport subscription SID rotated');
+        }
+
         dlnaLog('Renewed AVTransport event subscription');
         subscriptionRenewalTimeout = setTimeout(
             () => renewEventSubscription(device),
@@ -940,27 +1094,53 @@ async function renewEventSubscription(device: DlnaDevice): Promise<void> {
 }
 
 async function renewTopologySubscription(device: DlnaDevice): Promise<void> {
-    if (!topologySubscriptionSid) return;
+    const currentSid = topologySubscriptionSid;
+    if (!currentSid) return;
+
+    const currentSubscription = activeSubscriptions.get(currentSid);
+    let addresses = currentSubscription?.addresses ?? [];
+
     try {
         const parsedUrl = new URL(getTopologyEventUrl(device));
-        await new Promise<void>((resolve, reject) => {
+        if (addresses.length === 0) {
+            addresses = await resolveHostAddresses(parsedUrl.hostname);
+        }
+
+        const renewedSid = await new Promise<string>((resolve, reject) => {
             const req = http.request(
                 {
-                    headers: { SID: topologySubscriptionSid!, TIMEOUT: 'Second-1800' },
+                    headers: { SID: currentSid, TIMEOUT: 'Second-1800' },
                     hostname: parsedUrl.hostname,
                     method: 'SUBSCRIBE',
                     path: parsedUrl.pathname,
                     port: parsedUrl.port || '1400',
                 },
                 (res) => {
+                    const sid = res.headers.sid ?? currentSid;
+                    const status = res.statusCode ?? 0;
                     res.resume();
-                    resolve();
+                    if (status >= 200 && status < 300 && isValidNotifySid(sid)) resolve(sid);
+                    else reject(new Error('Invalid topology renewal response'));
                 },
             );
             req.on('error', reject);
             req.setTimeout(5000, () => req.destroy(new Error('Topology renewal timed out')));
             req.end();
         });
+
+        if (topologySubscriptionSid !== currentSid) return;
+        if (renewedSid !== currentSid) {
+            rotateSubscriptionSid(
+                activeSubscriptions,
+                currentSid,
+                renewedSid,
+                'topology',
+                addresses,
+            );
+            topologySubscriptionSid = renewedSid;
+            dlnaLog('ZoneGroupTopology subscription SID rotated');
+        }
+
         dlnaLog('Renewed ZoneGroupTopology subscription');
         topologyRenewalTimeout = setTimeout(
             () => renewTopologySubscription(device),
@@ -999,9 +1179,14 @@ async function startEventSubscription(device: DlnaDevice): Promise<void> {
         return;
     }
     await ensureEventServer();
+    const server = eventServer;
     const callbackUrl = `http://${lanIp}:${eventServerPort}/notify`;
+    const parsedUrl = new URL(getEventUrl(device));
+    const addresses = await resolveHostAddresses(parsedUrl.hostname);
+    if (!server || eventServer !== server) return;
+    const pending = setPendingSubscription(pendingSubscriptions, 'avtransport', addresses);
+
     try {
-        const parsedUrl = new URL(getEventUrl(device));
         const sid = await new Promise<string>((resolve, reject) => {
             const req = http.request(
                 {
@@ -1016,23 +1201,36 @@ async function startEventSubscription(device: DlnaDevice): Promise<void> {
                     port: parsedUrl.port || '1400',
                 },
                 (res) => {
-                    const sid = res.headers['sid'] as string | undefined;
+                    const sid = res.headers.sid;
+                    const status = res.statusCode ?? 0;
                     res.resume();
-                    if (sid) resolve(sid);
-                    else reject(new Error('No SID'));
+                    if (status >= 200 && status < 300 && isValidNotifySid(sid)) resolve(sid);
+                    else reject(new Error('Invalid AVTransport SUBSCRIBE response'));
                 },
             );
             req.on('error', reject);
             req.setTimeout(5000, () => req.destroy(new Error('SUBSCRIBE timed out')));
             req.end();
         });
+        const confirmed = activatePendingSubscription(
+            pendingSubscriptions,
+            activeSubscriptions,
+            pending,
+            sid,
+        );
+        if (!confirmed) return;
+        if (subscriptionSid && subscriptionSid !== sid) activeSubscriptions.delete(subscriptionSid);
         subscriptionSid = sid;
-        dlnaLog(`Subscribed to AVTransport events (SID: ${sid})`);
+        if (confirmed.initialBody !== undefined) handleEventNotify(confirmed.initialBody);
+        dlnaLog('Subscribed to AVTransport events');
         subscriptionRenewalTimeout = setTimeout(
             () => renewEventSubscription(device),
             25 * 60 * 1000,
         );
     } catch (err) {
+        if (pendingSubscriptions.get('avtransport') === pending) {
+            clearPendingSubscription(pendingSubscriptions, 'avtransport');
+        }
         dlnaLog('Failed to subscribe to AVTransport events', err);
     }
 }
@@ -1376,9 +1574,14 @@ async function startTopologySubscription(device: DlnaDevice): Promise<void> {
     const lanIp = getLanIp();
     if (!lanIp) return;
     await ensureEventServer();
+    const server = eventServer;
     const callbackUrl = `http://${lanIp}:${eventServerPort}/topology`;
+    const parsedUrl = new URL(getTopologyEventUrl(device));
+    const addresses = await resolveHostAddresses(parsedUrl.hostname);
+    if (!server || eventServer !== server) return;
+    const pending = setPendingSubscription(pendingSubscriptions, 'topology', addresses);
+
     try {
-        const parsedUrl = new URL(getTopologyEventUrl(device));
         const sid = await new Promise<string>((resolve, reject) => {
             const req = http.request(
                 {
@@ -1393,28 +1596,44 @@ async function startTopologySubscription(device: DlnaDevice): Promise<void> {
                     port: parsedUrl.port || '1400',
                 },
                 (res) => {
-                    const sid = res.headers['sid'] as string | undefined;
+                    const sid = res.headers.sid;
+                    const status = res.statusCode ?? 0;
                     res.resume();
-                    if (sid) resolve(sid);
-                    else reject(new Error('No SID'));
+                    if (status >= 200 && status < 300 && isValidNotifySid(sid)) resolve(sid);
+                    else reject(new Error('Invalid topology SUBSCRIBE response'));
                 },
             );
             req.on('error', reject);
             req.setTimeout(5000, () => req.destroy(new Error('Topology SUBSCRIBE timed out')));
             req.end();
         });
+        const confirmed = activatePendingSubscription(
+            pendingSubscriptions,
+            activeSubscriptions,
+            pending,
+            sid,
+        );
+        if (!confirmed) return;
+        if (topologySubscriptionSid && topologySubscriptionSid !== sid) {
+            activeSubscriptions.delete(topologySubscriptionSid);
+        }
         topologySubscriptionSid = sid;
-        dlnaLog(`Subscribed to ZoneGroupTopology events (SID: ${sid})`);
+        if (confirmed.initialBody !== undefined) handleTopologyNotify(confirmed.initialBody);
+        dlnaLog('Subscribed to ZoneGroupTopology events');
         topologyRenewalTimeout = setTimeout(
             () => renewTopologySubscription(device),
             25 * 60 * 1000,
         );
     } catch (err) {
+        if (pendingSubscriptions.get('topology') === pending) {
+            clearPendingSubscription(pendingSubscriptions, 'topology');
+        }
         dlnaLog('Failed to subscribe to ZoneGroupTopology events', err);
     }
 }
 
 async function stopEventSubscription(device: DlnaDevice): Promise<void> {
+    clearPendingSubscription(pendingSubscriptions, 'avtransport');
     if (subscriptionRenewalTimeout) {
         clearTimeout(subscriptionRenewalTimeout);
         subscriptionRenewalTimeout = null;
@@ -1447,6 +1666,7 @@ async function stopEventSubscription(device: DlnaDevice): Promise<void> {
     } catch {
         // Catch
     }
+    if (subscriptionSid) activeSubscriptions.delete(subscriptionSid);
     subscriptionSid = null;
 }
 
@@ -1469,6 +1689,7 @@ function stopSpeedProxy(): void {
 }
 
 async function stopTopologySubscription(device: DlnaDevice): Promise<void> {
+    clearPendingSubscription(pendingSubscriptions, 'topology');
     if (topologyRenewalTimeout) {
         clearTimeout(topologyRenewalTimeout);
         topologyRenewalTimeout = null;
@@ -1501,6 +1722,7 @@ async function stopTopologySubscription(device: DlnaDevice): Promise<void> {
     } catch (error) {
         log.error('[DLNA] Failed to unsubscribe from ZoneGroupTopology events', error);
     }
+    if (topologySubscriptionSid) activeSubscriptions.delete(topologySubscriptionSid);
     topologySubscriptionSid = null;
 }
 
@@ -1634,7 +1856,9 @@ ipcMain.handle('dlna-connect', async (_event, device: DlnaDevice) => {
                 positionOffsetSeconds = 0;
                 nextUri = mediaInfo.nextUri || '';
                 if (nextUri) lastQueuedNextUri = nextUri;
-                dlnaLog(`Device already playing: ${currentUri} at ${currentPosition}s (${tState})`);
+                dlnaLog(
+                    `Device already playing: ${summarizeUrlForLog(currentUri)} at ${currentPosition}s (${tState})`,
+                );
             }
         } catch {
             // Catch
@@ -1804,7 +2028,7 @@ ipcMain.on('dlna-set-radio-mode', (_event, enabled: boolean) => {
 ipcMain.on(
     'dlna-play-url',
     async (
-        _event,
+        event,
         data: {
             isMuted?: boolean;
             metadata: TrackMetadata;
@@ -1813,6 +2037,7 @@ ipcMain.on(
             url: string;
         },
     ) => {
+        if (!isTrustedIpcSender(event) || !isHttpUrl(data?.url)) return;
         if (!connectedDevice) return;
         const device = connectedDevice;
         playInFlight = true;
@@ -1946,7 +2171,8 @@ ipcMain.on(
 );
 
 // Set the next track for gapless playback
-ipcMain.on('dlna-set-next-url', async (_event, data: { metadata: TrackMetadata; url: string }) => {
+ipcMain.on('dlna-set-next-url', async (event, data: { metadata: TrackMetadata; url: string }) => {
+    if (!isTrustedIpcSender(event) || (data?.url && !isHttpUrl(data.url))) return;
     if (!connectedDevice) return;
     await settleBeforeNextUriChange();
     if (!connectedDevice) return;
@@ -2171,10 +2397,16 @@ ipcMain.on(
 
 ipcMain.handle(
     'dlna-prepare-speed-file',
-    async (
-        _event,
-        data: { offset: number; preservePitch: boolean; speed: number; url: string },
-    ) => {
+    async (event, data: { offset: number; preservePitch: boolean; speed: number; url: string }) => {
+        if (
+            !isTrustedIpcSender(event) ||
+            !isHttpUrl(data?.url) ||
+            !Number.isFinite(data.speed) ||
+            data.speed < 0.5 ||
+            data.speed > 2
+        ) {
+            return null;
+        }
         stopCurrentTranscode();
         try {
             execSync('ffmpeg -version', { stdio: 'ignore' });
@@ -2268,7 +2500,8 @@ ipcMain.handle(
 
 ipcMain.handle(
     'dlna-check-speed-file',
-    async (_event, data: { preservePitch: boolean; speed: number; url: string }) => {
+    async (event, data: { preservePitch: boolean; speed: number; url: string }) => {
+        if (!isTrustedIpcSender(event) || !isHttpUrl(data?.url)) return null;
         let lanIp = getLanIp();
         if (connectedDevice) {
             try {

@@ -32,18 +32,3 @@ export const useGithubReleasesList = (perPage = RELEASES_TO_FETCH) => {
         retry: 2,
     });
 };
-
-export const useGithubLatestRelease = (options?: {
-    refetchInterval?: number;
-    refetchIntervalInBackground?: boolean;
-}) => {
-    return useQuery({
-        queryFn: async () => {
-            const response = await axios.get<GitHubRelease>(`${GITHUB_RELEASES_URL}/latest`);
-            return response.data;
-        },
-        queryKey: ['github-latest-release'],
-        retry: 2,
-        ...options,
-    });
-};

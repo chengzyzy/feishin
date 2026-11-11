@@ -41,10 +41,10 @@ export interface TagEditorUtils {
     cancelReadSongMetadata: () => void;
     offBatchProgress: (cb: (event: unknown, data: BatchProgress) => void) => void;
     onBatchProgress: (cb: (event: unknown, data: BatchProgress) => void) => void;
-    readLocalImage: (filePath: string) => Promise<ReadLocalImageResult>;
-    readSongMetadataBatch: (filePaths: string[]) => Promise<ReadSongMetadataBatchResult>;
+    readLocalImage: (grantId: string) => Promise<ReadLocalImageResult>;
+    readSongMetadataBatch: (grantId: string) => Promise<ReadSongMetadataBatchResult>;
     writeSongTagsBatch: (
-        filePaths: string[],
+        grantId: string,
         edits: Record<string, TagValue>,
         removed: string[],
         artworkOp?: ArtworkOp,

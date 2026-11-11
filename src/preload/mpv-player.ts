@@ -6,12 +6,16 @@ const initialize = (data: { extraParameters?: string[]; properties?: Record<stri
     return ipcRenderer.invoke('player-initialize', data);
 };
 
-const restart = (data: {
-    binaryPath?: string;
-    extraParameters?: string[];
-    properties?: Record<string, any>;
-}) => {
+const restart = (data: { extraParameters?: string[]; properties?: Record<string, any> }) => {
     return ipcRenderer.invoke('player-restart', data);
+};
+
+const selectBinary = (): Promise<null | string> => {
+    return ipcRenderer.invoke('mpv-select-binary');
+};
+
+const clearBinary = (): Promise<boolean> => {
+    return ipcRenderer.invoke('mpv-clear-binary');
 };
 
 const isRunning = () => {
@@ -193,6 +197,7 @@ const rendererMpvReconnect = (cb: () => void) => {
 export const mpvPlayer = {
     autoNext,
     cleanup,
+    clearBinary,
     currentTime,
     getAudioDevices,
     getCurrentTime,
@@ -209,6 +214,7 @@ export const mpvPlayer = {
     restart,
     seek,
     seekTo,
+    selectBinary,
     setProperties,
     setQueue,
     setQueueNext,

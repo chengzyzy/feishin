@@ -27,12 +27,18 @@ type DivProps = Omit<
 
 interface DragDropZoneTextProps {
     icon: keyof typeof AppIcon;
+    maxBytes?: number;
     mode?: 'text';
     onItemSelected: (contents: string) => void;
     validateItem?: (contents: string) => { error?: string; isValid: boolean };
 }
 
-const DragDropZoneText = ({ icon, onItemSelected, validateItem }: DragDropZoneTextProps) => {
+const DragDropZoneText = ({
+    icon,
+    maxBytes,
+    onItemSelected,
+    validateItem,
+}: DragDropZoneTextProps) => {
     const zoneFileInput = useRef<HTMLInputElement | null>(null);
     const [error, setError] = useState<string>('');
 
@@ -52,6 +58,31 @@ const DragDropZoneText = ({ icon, onItemSelected, validateItem }: DragDropZoneTe
         [onItemSelected, validateItem],
     );
 
+    const readFile = useCallback(
+        (file: File) => {
+            if (maxBytes !== undefined && file.size > maxBytes) {
+                setError(
+                    t('dragDropZone.error_fileTooLarge', {
+                        maxSize: `${maxBytes / (1024 * 1024)} MiB`,
+                    }).toString(),
+                );
+                return;
+            }
+
+            file.text()
+                .then((value) => processItem(value.toString()))
+                .catch((err) => {
+                    const readError = err as Error;
+                    setError(
+                        t('dragDropZone.error_readingFile', {
+                            errorMessage: readError.message,
+                        }),
+                    );
+                });
+        },
+        [maxBytes, processItem],
+    );
+
     const onItemDropped = useCallback(
         (event: DragEvent<HTMLDivElement>) => {
             event.preventDefault();
@@ -69,18 +100,9 @@ const DragDropZoneText = ({ icon, onItemSelected, validateItem }: DragDropZoneTe
                 return;
             }
 
-            file.text()
-                .then((value) => processItem(value.toString()))
-                .catch((err) => {
-                    const error = err as Error;
-                    setError(
-                        t('dragDropZone.error_readingFile', {
-                            errorMessage: error.message,
-                        }),
-                    );
-                });
+            readFile(file);
         },
-        [processItem],
+        [readFile],
     );
 
     const onDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
@@ -101,20 +123,9 @@ const DragDropZoneText = ({ icon, onItemSelected, validateItem }: DragDropZoneTe
                 return;
             }
 
-            const reader = new FileReader();
-            reader.addEventListener('load', (event) => {
-                const contents = event.target?.result;
-
-                if (!contents) {
-                    return;
-                }
-
-                processItem(contents.toString());
-            });
-
-            reader.readAsText(files[0]);
+            readFile(files[0]);
         },
-        [processItem],
+        [readFile],
     );
 
     const hasErrored = error.length > 0;
