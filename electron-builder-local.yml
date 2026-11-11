@@ -18,8 +18,9 @@ extraMetadata:
     name: feishin-local
     productName: Feishin Local
 
-# electron-builder deep-merges target arrays from the base config; the workflow
-# passes --arm64, so only the arm64 target is produced.
+# The base config's target arrays and arch lists are merged into this config.
+# The CI workflow explicitly requests dmg:arm64 and zip:arm64, which keeps the
+# effective target map to arm64 only and avoids inherited x64 targets.
 mac:
     target:
         - target: dmg
