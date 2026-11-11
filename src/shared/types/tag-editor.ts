@@ -45,6 +45,7 @@ export interface TagEditorUtils {
     readSongMetadataBatch: (grantId: string) => Promise<ReadSongMetadataBatchResult>;
     writeSongTagsBatch: (
         grantId: string,
+        filePaths: string[],
         edits: Record<string, TagValue>,
         removed: string[],
         artworkOp?: ArtworkOp,
