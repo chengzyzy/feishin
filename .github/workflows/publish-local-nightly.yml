@@ -38,9 +38,16 @@ jobs:
           cd "$RUNNER_TEMP/feishin-nightly"
           source_dmg='Feishin Local-1.17.0-mac-arm64.dmg'
           release_dmg=Feishin-1.17.0-mac-arm64.dmg
+          nightly_tag=nightly-20261111-446d9c0
           read -r actual_sha _ < <(sha256sum "$source_dmg")
           if [[ "$actual_sha" != '7deefb0c935dc823ccf0235aa73d09964692853bd25645ada94df1f160923e1f' ]]; then
             echo '::error::DMG SHA-256 mismatch'
+            exit 1
+          fi
+          # The Actions token cannot create tags for commits with workflow changes.
+          tag_commit="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$nightly_tag" --jq '.object | select(.type == "commit") | .sha')"
+          if [[ "$tag_commit" != '446d9c0778c15c86427d73ed4c9b977d658efc94' ]]; then
+            echo '::error::Nightly tag does not point to the verified build commit'
             exit 1
           fi
           mv "$source_dmg" "$release_dmg"
@@ -55,8 +62,8 @@ jobs:
           DMG SHA-256 `7deefb0c935dc823ccf0235aa73d09964692853bd25645ada94df1f160923e1f`
           NOTES
 
-          gh release create nightly-20261111-446d9c0 "$release_dmg" \
+          gh release create "$nightly_tag" "$release_dmg" \
             --repo "$GITHUB_REPOSITORY" \
-            --target 446d9c0778c15c86427d73ed4c9b977d658efc94 \
+            --verify-tag \
             --prerelease --latest=false \
             --title 'Feishin Nightly 2026-11-11' --notes-file release-notes.md
