@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - codex/fix-feishin-security-v261111
+    paths-ignore:
+      - .github/workflows/publish-local-nightly.yml
   workflow_dispatch:
 
 permissions:
