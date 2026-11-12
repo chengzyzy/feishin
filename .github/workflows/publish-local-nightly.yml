@@ -34,6 +34,7 @@ jobs:
           EXPECTED_SHA256: ${{ inputs.expected-sha256 }}
         run: |
           set -euo pipefail
+          trap 'echo "::error::Nightly publication failed at line $LINENO"' ERR
           cd "$RUNNER_TEMP/feishin-nightly"
           mapfile -d '' dmgs < <(find . -type f -name '*.dmg' -print0)
           test "${#dmgs[@]}" -eq 1
@@ -68,7 +69,10 @@ jobs:
           fi
           gh release upload nightly "$release_dmg" SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" --clobber
-          published_sha="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/nightly" \
+          release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq '.[] | select(.tag_name == "nightly") | .id')"
+          [[ "$release_id" =~ ^[0-9]+$ ]]
+          published_sha="$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" \
             --jq '.assets[] | select(.name == "Feishin-mac-arm64.dmg") | .digest')"
           test "$published_sha" = "sha256:$actual_sha"
           gh release edit nightly --repo "$GITHUB_REPOSITORY" \
