@@ -268,7 +268,9 @@ export const getMpvInstance = () => {
 
 const QUIT_TIMEOUT_MS = 3000;
 
-const getMpvChildProcess = (mpv: MpvAPI): ChildProcess | undefined => mpv.mpvPlayer;
+// 固定版本在运行时保留子进程句柄，但未在类型声明中暴露该字段。
+const getMpvChildProcess = (mpv: MpvAPI): ChildProcess | undefined =>
+    (mpv as MpvAPI & { mpvPlayer?: ChildProcess }).mpvPlayer;
 
 const isMpvChildRunning = (child?: ChildProcess): child is ChildProcess =>
     child?.pid !== undefined && child.exitCode === null && child.signalCode === null;
