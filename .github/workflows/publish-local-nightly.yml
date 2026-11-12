@@ -1,71 +1,78 @@
 name: Publish verified Feishin Nightly
 
 on:
-  push:
-    branches:
-      - codex/fix-feishin-security-v261111
-    paths:
-      - .github/workflows/publish-local-nightly.yml
+  workflow_call:
+    inputs:
+      artifact-id:
+        required: true
+        type: string
+      expected-sha256:
+        required: true
+        type: string
 
 permissions: {}
 
-concurrency:
-  group: feishin-local-nightly-20261112-ae9bcdc
-
 jobs:
   publish:
-    if: github.repository == 'chengzyzy/feishin'
+    if: github.repository == 'chengzyzy/feishin' && github.ref == 'refs/heads/codex/fix-feishin-security-v261111'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       actions: read
       contents: write
     steps:
-      - name: Download verified arm64 DMG from run 43136397554
+      - name: Download this build's verified arm64 DMG
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          github-token: ${{ github.token }}
-          run-id: '43136397554'
-          artifact-ids: '13908455725'
+          artifact-ids: ${{ inputs.artifact-id }}
           path: ${{ runner.temp }}/feishin-nightly
           digest-mismatch: error
 
-      - name: Verify SHA-256 and publish the Nightly prerelease
+      - name: Verify original DMG and update Nightly
         env:
           GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA256: ${{ inputs.expected-sha256 }}
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/feishin-nightly"
-          source_dmg='Feishin Local-1.17.0-mac-arm64.dmg'
-          release_dmg=Feishin-1.17.0-mac-arm64.dmg
-          nightly_tag=nightly-20261112-ae9bcdc
+          mapfile -d '' dmgs < <(find . -type f -name '*.dmg' -print0)
+          test "${#dmgs[@]}" -eq 1
+          source_dmg="${dmgs[0]}"
           read -r actual_sha _ < <(sha256sum "$source_dmg")
-          if [[ "$actual_sha" != '55d0b375c437fe77854dc3ecc084759c7f98090d139a7f53524a9a2a9c1ecb2e' ]]; then
-            echo '::error::DMG SHA-256 mismatch'
-            exit 1
-          fi
-          # The Actions token cannot create tags for commits with workflow changes.
-          tag_commit="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$nightly_tag" --jq '.object | select(.type == "commit") | .sha')"
-          if [[ "$tag_commit" != 'ae9bcdc9db05b59f8d90f15e79c3a95fa74a84c5' ]]; then
-            echo '::error::Nightly tag does not point to the verified build commit'
-            exit 1
-          fi
+          [[ "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "$actual_sha" = "$EXPECTED_SHA256"
+          release_dmg=Feishin-mac-arm64.dmg
           mv "$source_dmg" "$release_dmg"
+          printf '%s  %s\n' "$actual_sha" "$release_dmg" > SHA256SUMS
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          commit_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$GITHUB_SHA"
 
-          cat > release-notes.md <<'NOTES'
-          Feishin 1.17.0 Nightly，适用于 Apple 芯片的 Mac。安装文件为 `Feishin Local.app`，Dock 显示 **Feishin**。
+          cat > release-notes.md <<NOTES
+          Feishin macOS arm64 滚动 Nightly，由成功的构建自动更新。
 
-          DMG 来自 [已验证的构建 #43136397554](https://github.com/chengzyzy/feishin/actions/runs/43136397554)，源码提交为 `ae9bcdc9db05b59f8d90f15e79c3a95fa74a84c5`。CI 已通过类型检查、46 项安全回归、架构和签名完整性校验以及空白配置首次启动检查。
+          应用源码对应 [提交 ${GITHUB_SHA:0:8}]($commit_url)，构建证据见 [Actions #$GITHUB_RUN_ID]($run_url)。Nightly 标签用于固定下载入口，应用源码以此处记录的构建提交为准。
 
-          本版将 CSP 落到生产文档，去除 MPV 的 shell 探测并约束启动参数和运行时属性。CSP 为内置 Butterchurn 可视化允许 `unsafe-eval`。真实 Navidrome 连接、播放及原生 MPV 的本机运行验收仍待完成。
+          DMG 使用本次 Actions 的原始产物。发布前已核对 SHA-256，构建已通过架构、签名完整性与空白配置首次启动检查。真实 Navidrome 连接和播放需单独运行验收。
 
           应用采用 ad-hoc 签名，未做 Apple 公证。
 
-          DMG SHA-256 `55d0b375c437fe77854dc3ecc084759c7f98090d139a7f53524a9a2a9c1ecb2e`
+          DMG SHA-256 \`$actual_sha\`
           NOTES
 
-          gh release create "$nightly_tag" "$release_dmg" \
-            --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --prerelease --latest=false \
-            --title 'Feishin Nightly 2026-11-12' --notes-file release-notes.md
+          # 固定标签预先建立，内置令牌只维护 Release 与资产。
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/nightly" --silent
+          if ! gh release view nightly --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create nightly --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --draft --prerelease --latest=false --title 'Feishin Nightly' \
+              --notes-file release-notes.md
+          fi
+          gh release upload nightly "$release_dmg" SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --clobber
+          published_sha="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/nightly" \
+            --jq '.assets[] | select(.name == "Feishin-mac-arm64.dmg") | .digest')"
+          test "$published_sha" = "sha256:$actual_sha"
+          gh release edit nightly --repo "$GITHUB_REPOSITORY" \
+            --draft=false --prerelease --latest=false --title 'Feishin Nightly' \
+            --notes-file release-notes.md
+          printf 'Nightly Release %s/%s/releases/tag/nightly\n' \
+            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" >> "$GITHUB_STEP_SUMMARY"

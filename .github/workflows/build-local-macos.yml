@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - codex/fix-feishin-security-v261111
-    paths-ignore:
-      - .github/workflows/publish-local-nightly.yml
   workflow_dispatch:
+
+concurrency:
+  group: feishin-local-arm64-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -23,6 +25,9 @@ jobs:
   build:
     runs-on: macos-26
     timeout-minutes: 60
+    outputs:
+      dmg-artifact-id: ${{ steps.dmg.outputs.artifact-id }}
+      dmg-sha256: ${{ steps.dmg.outputs.artifact-digest }}
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -189,3 +194,14 @@ jobs:
             dist/audit/audit.stderr.log
             dist/audit/audit-command.txt
           if-no-files-found: error
+
+  publish-nightly:
+    needs: build
+    if: github.repository == 'chengzyzy/feishin' && github.ref == 'refs/heads/codex/fix-feishin-security-v261111'
+    permissions:
+      actions: read
+      contents: write
+    uses: ./.github/workflows/publish-local-nightly.yml
+    with:
+      artifact-id: ${{ needs.build.outputs.dmg-artifact-id }}
+      expected-sha256: ${{ needs.build.outputs.dmg-sha256 }}
