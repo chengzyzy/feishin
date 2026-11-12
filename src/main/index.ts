@@ -1,6 +1,3 @@
-// 配置模块在导入时读取用户目录，因此必须先恢复本 fork 的原有目录。
-import './local-profile';
-
 import { is } from '@electron-toolkit/utils';
 import {
     app,

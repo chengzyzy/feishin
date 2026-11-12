@@ -2,7 +2,7 @@
 # metadata; this file changes only the app identity and target matrix.
 extends: ./electron-builder.yml
 
-appId: io.github.chengzyzy.feishin.local
+appId: io.github.chengzyzy.feishin
 productName: Feishin
 artifactName: ${productName}-${version}-${os}-${arch}.${ext}
 electronVersion: 43.8.8
@@ -15,7 +15,7 @@ directories:
 publish: []
 
 extraMetadata:
-    name: feishin-local
+    name: feishin
     productName: Feishin
 
 # The base config's target arrays and arch lists are merged into this config.

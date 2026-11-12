@@ -3,7 +3,7 @@
 set -euo pipefail
 
 DIST_DIR="${1:-dist}"
-EXPECTED_BUNDLE_ID="io.github.chengzyzy.feishin.local"
+EXPECTED_BUNDLE_ID="io.github.chengzyzy.feishin"
 EXPECTED_APP_NAME="Feishin"
 EXPECTED_DISPLAY_NAME="Feishin"
 REPORT="$DIST_DIR/verification.txt"
