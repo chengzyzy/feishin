@@ -4,7 +4,7 @@ set -euo pipefail
 
 DIST_DIR="${1:-dist}"
 EXPECTED_BUNDLE_ID="io.github.chengzyzy.feishin.local"
-EXPECTED_APP_NAME="Feishin Local"
+EXPECTED_APP_NAME="Feishin"
 EXPECTED_DISPLAY_NAME="Feishin"
 REPORT="$DIST_DIR/verification.txt"
 TMP_DIR="$(mktemp -d)"
@@ -40,19 +40,22 @@ ditto -x -k "$ZIP" "$TMP_DIR/zip"
 APP="$TMP_DIR/zip/$EXPECTED_APP_NAME.app"
 
 verify_app() {
-    local bundle="$1" bundle_id app_name display_name archs signature
+    local bundle="$1" bundle_id app_name display_name executable_name archs signature
     log "APP=$bundle"
     bundle_id="$(plutil -extract CFBundleIdentifier raw "$bundle/Contents/Info.plist")"
     app_name="$(plutil -extract CFBundleName raw "$bundle/Contents/Info.plist")"
     display_name="$(plutil -extract CFBundleDisplayName raw "$bundle/Contents/Info.plist")"
+    executable_name="$(plutil -extract CFBundleExecutable raw "$bundle/Contents/Info.plist")"
     archs="$(lipo -archs "$bundle/Contents/MacOS/$EXPECTED_APP_NAME")"
     log "CFBundleIdentifier=$bundle_id"
     log "CFBundleName=$app_name"
     log "CFBundleDisplayName=$display_name"
+    log "CFBundleExecutable=$executable_name"
     log "architecture=$archs"
     [[ "$bundle_id" == "$EXPECTED_BUNDLE_ID" ]]
     [[ "$app_name" == "$EXPECTED_APP_NAME" ]]
     [[ "$display_name" == "$EXPECTED_DISPLAY_NAME" ]]
+    [[ "$executable_name" == "$EXPECTED_APP_NAME" ]]
     [[ "$archs" == arm64 ]]
     codesign --verify --deep --strict --verbose=2 "$bundle" 2>&1 | tee -a "$REPORT"
     signature="$(codesign -d --verbose=4 "$bundle" 2>&1)"

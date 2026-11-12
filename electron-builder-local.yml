@@ -3,7 +3,7 @@
 extends: ./electron-builder.yml
 
 appId: io.github.chengzyzy.feishin.local
-productName: Feishin Local
+productName: Feishin
 artifactName: ${productName}-${version}-${os}-${arch}.${ext}
 electronVersion: 43.8.8
 
@@ -16,7 +16,7 @@ publish: []
 
 extraMetadata:
     name: feishin-local
-    productName: Feishin Local
+    productName: Feishin
 
 # The base config's target arrays and arch lists are merged into this config.
 # The CI workflow explicitly requests dmg:arm64 and zip:arm64, which keeps the

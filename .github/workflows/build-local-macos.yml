@@ -124,7 +124,7 @@ jobs:
       - name: Verify first launch on a fresh profile
         run: |
           set -euo pipefail
-          app="dist/mac-arm64/Feishin Local.app/Contents/MacOS/Feishin Local"
+          app="dist/mac-arm64/Feishin.app/Contents/MacOS/Feishin"
           profile="$HOME/Library/Application Support/Feishin Local"
           test ! -e "$profile"
           "$app" > dist/startup.log 2>&1 &
