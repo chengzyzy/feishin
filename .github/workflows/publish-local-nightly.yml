@@ -10,7 +10,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: feishin-local-nightly-20261111-446d9c0
+  group: feishin-local-nightly-20261112-ae9bcdc
 
 jobs:
   publish:
@@ -21,12 +21,12 @@ jobs:
       actions: read
       contents: write
     steps:
-      - name: Download verified arm64 DMG from run 43005237973
+      - name: Download verified arm64 DMG from run 43136397554
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           github-token: ${{ github.token }}
-          run-id: '43005237973'
-          artifact-ids: '13849025398'
+          run-id: '43136397554'
+          artifact-ids: '13908455725'
           path: ${{ runner.temp }}/feishin-nightly
           digest-mismatch: error
 
@@ -38,15 +38,15 @@ jobs:
           cd "$RUNNER_TEMP/feishin-nightly"
           source_dmg='Feishin Local-1.17.0-mac-arm64.dmg'
           release_dmg=Feishin-1.17.0-mac-arm64.dmg
-          nightly_tag=nightly-20261111-446d9c0
+          nightly_tag=nightly-20261112-ae9bcdc
           read -r actual_sha _ < <(sha256sum "$source_dmg")
-          if [[ "$actual_sha" != '7deefb0c935dc823ccf0235aa73d09964692853bd25645ada94df1f160923e1f' ]]; then
+          if [[ "$actual_sha" != '55d0b375c437fe77854dc3ecc084759c7f98090d139a7f53524a9a2a9c1ecb2e' ]]; then
             echo '::error::DMG SHA-256 mismatch'
             exit 1
           fi
           # The Actions token cannot create tags for commits with workflow changes.
           tag_commit="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$nightly_tag" --jq '.object | select(.type == "commit") | .sha')"
-          if [[ "$tag_commit" != '446d9c0778c15c86427d73ed4c9b977d658efc94' ]]; then
+          if [[ "$tag_commit" != 'ae9bcdc9db05b59f8d90f15e79c3a95fa74a84c5' ]]; then
             echo '::error::Nightly tag does not point to the verified build commit'
             exit 1
           fi
@@ -55,15 +55,17 @@ jobs:
           cat > release-notes.md <<'NOTES'
           Feishin 1.17.0 Nightly，适用于 Apple 芯片的 Mac。安装文件为 `Feishin Local.app`，Dock 显示 **Feishin**。
 
-          DMG 来自 [已验证的构建 #43005237973](https://github.com/chengzyzy/feishin/actions/runs/43005237973)，源码提交为 `446d9c0778c15c86427d73ed4c9b977d658efc94`。CI 核对了显示名、架构、应用标识、签名完整性和空白配置首次启动。
+          DMG 来自 [已验证的构建 #43136397554](https://github.com/chengzyzy/feishin/actions/runs/43136397554)，源码提交为 `ae9bcdc9db05b59f8d90f15e79c3a95fa74a84c5`。CI 已通过类型检查、46 项安全回归、架构和签名完整性校验以及空白配置首次启动检查。
+
+          本版将 CSP 落到生产文档，去除 MPV 的 shell 探测并约束启动参数和运行时属性。CSP 为内置 Butterchurn 可视化允许 `unsafe-eval`。真实 Navidrome 连接、播放及原生 MPV 的本机运行验收仍待完成。
 
           应用采用 ad-hoc 签名，未做 Apple 公证。
 
-          DMG SHA-256 `7deefb0c935dc823ccf0235aa73d09964692853bd25645ada94df1f160923e1f`
+          DMG SHA-256 `55d0b375c437fe77854dc3ecc084759c7f98090d139a7f53524a9a2a9c1ecb2e`
           NOTES
 
           gh release create "$nightly_tag" "$release_dmg" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --prerelease --latest=false \
-            --title 'Feishin Nightly 2026-11-11' --notes-file release-notes.md
+            --title 'Feishin Nightly 2026-11-12' --notes-file release-notes.md
