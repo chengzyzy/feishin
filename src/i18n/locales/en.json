@@ -233,6 +233,7 @@
         "jellyfinQuickConnectNotActive": "Quick Connect is not active on this server",
         "localFontAccessDenied": "Access denied to local fonts",
         "loginRateError": "Too many login attempts, please try again in a few seconds",
+        "mpvInitializeFailed": "The local MPV player failed to start. Check the MPV executable path or switch to another player",
         "mpvRequired": "MPV required",
         "multipleServerSaveQueueError": "The play queue has one or more songs which are not from the current server. This is not supported",
         "networkError": "A network error occurred",

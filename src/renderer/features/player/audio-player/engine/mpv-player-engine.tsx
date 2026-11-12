@@ -98,23 +98,6 @@ export const MpvPlayerEngine = (props: MpvPlayerEngineProps) => {
         let isCancelled = false;
 
         const initializeMpv = async () => {
-            // Always quit mpv first to ensure clean state, especially during HMR remounts
-            const isRunning: boolean | undefined = await mpvPlayer?.isRunning();
-            if (isRunning) {
-                mpvPlayer?.quit();
-
-                let attempts = 0;
-                const maxAttempts = 20;
-                while (attempts < maxAttempts) {
-                    await new Promise((resolve) => setTimeout(resolve, 100));
-                    const stillRunning = await mpvPlayer?.isRunning();
-                    if (!stillRunning) {
-                        break;
-                    }
-                    attempts++;
-                }
-            }
-
             // Reset initialization state
             hasPopulatedQueueRef.current = false;
 
@@ -131,18 +114,32 @@ export const MpvPlayerEngine = (props: MpvPlayerEngineProps) => {
             const audioDevice = mpvAudioDeviceId?.trim() || 'auto';
             extraParameters.push(`--audio-device=${audioDevice}`);
 
-            await mpvPlayer?.initialize({
+            const initResult = await mpvPlayer?.initialize({
                 extraParameters,
                 properties,
             });
+            if (isCancelled) return;
 
-            // Apply EQ and compressor filters after MPV has initialized
+            // A failed launch must not be treated as ready. The main process has
+            // already emitted the fallback event and returns a serializable error.
+            if (!mpvPlayer || !initResult?.success) {
+                logger.error('MPV initialization failed', {
+                    error: initResult?.error ?? 'MPV API unavailable',
+                    rejectedParameters: initResult?.rejectedParameters,
+                    rejectedProperties: initResult?.rejectedProperties,
+                });
+                return;
+            }
+
+            // Apply EQ and compressor filters after MPV has initialized. The main
+            // process validates the numeric settings before building the af value.
             const { compressor, equalizer } = useSettingsStore.getState().playback;
-            const { buildMpvAudioFilters } =
-                await import('/@/renderer/features/settings/components/playback/mpv-audio-filters');
-            const filterStr = buildMpvAudioFilters(equalizer, compressor);
-            if (filterStr) {
-                mpvPlayer?.setProperties({ af: filterStr });
+            const filterResult = await mpvPlayer.setAudioFilters(equalizer, compressor);
+            if (isCancelled) return;
+            if (!filterResult.success) {
+                logger.warn('MPV audio filters could not be applied', {
+                    error: filterResult.error,
+                });
             }
 
             // After initialization, populate the queue if currentSrc is available
@@ -166,7 +163,8 @@ export const MpvPlayerEngine = (props: MpvPlayerEngineProps) => {
                     });
                 }
 
-                if (currentSongUrl && !hasPopulatedQueueRef.current && mpvPlayer) {
+                if (isCancelled) return;
+                if (currentSongUrl && !hasPopulatedQueueRef.current) {
                     const isDifferentNextSong =
                         playerData.nextSong &&
                         playerData.nextSong.id !== playerData.currentSong?.id;
@@ -181,11 +179,13 @@ export const MpvPlayerEngine = (props: MpvPlayerEngineProps) => {
                         playerHandoff.pendingLocalSeek = -1;
                     }
                     await new Promise((r) => setTimeout(r, 400));
-                    if (isMountedRef.current) {
+                    if (!isCancelled && isMountedRef.current) {
                         setInitializationTick((t) => t + 1);
                         if (seekToAfterInit > 0) {
                             setTimeout(() => {
-                                if (isMountedRef.current) mpvPlayer?.seekTo(seekToAfterInit);
+                                if (!isCancelled && isMountedRef.current) {
+                                    mpvPlayer.seekTo(seekToAfterInit);
+                                }
                             }, 800);
                         }
                     }
@@ -197,9 +197,9 @@ export const MpvPlayerEngine = (props: MpvPlayerEngineProps) => {
             }
         };
 
-        // Guard against an unhandled rejection (e.g. a failed getSongUrl / initialize
-        // call); the player simply stays uninitialized and a reload can retry.
-        initializeMpv().catch(() => undefined);
+        initializeMpv().catch((error) => {
+            if (!isCancelled) logger.error('MPV initialization failed', { error });
+        });
 
         return () => {
             isCancelled = true;
@@ -249,7 +249,7 @@ export const MpvPlayerEngine = (props: MpvPlayerEngineProps) => {
             return;
         }
 
-        mpvPlayer.setProperties({ speed });
+        void mpvPlayer.setProperties({ speed });
     }, [isInitialized, speed]);
 
     // Update pitch correction status
@@ -259,9 +259,9 @@ export const MpvPlayerEngine = (props: MpvPlayerEngineProps) => {
         }
 
         if (preservePitch === false) {
-            mpvPlayer.setProperties({ 'audio-pitch-correction': 'no' });
+            void mpvPlayer.setProperties({ 'audio-pitch-correction': 'no' });
         } else {
-            mpvPlayer.setProperties({ 'audio-pitch-correction': 'yes' });
+            void mpvPlayer.setProperties({ 'audio-pitch-correction': 'yes' });
         }
     }, [isInitialized, preservePitch]);
 

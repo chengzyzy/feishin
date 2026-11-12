@@ -1,17 +1,34 @@
+import type {
+    MpvInitializeResult,
+    MpvOperationResult,
+    MpvPropertySet,
+} from '/@/shared/types/mpv-settings';
+import type { ChildProcess } from 'node:child_process';
+
 import { app, dialog, ipcMain, powerMonitor } from 'electron';
 import { access, rm } from 'fs/promises';
 import uniq from 'lodash/uniq';
 import MpvAPI from 'node-mpv';
+import { once } from 'node:events';
 import { pid } from 'node:process';
 import process from 'process';
 
 import { getMainWindow, isTrustedIpcSender, sendToastToRenderer } from '../../../index';
 import log from '../../../logger';
 import { validateExecutableFile } from '../../../security/file-policy';
+import {
+    buildMpvLaunchOptions,
+    sanitizeMpvExtraParameters,
+    toMpvOperationError,
+    validateMpvCompressorSettings,
+    validateMpvEqSettings,
+    validateMpvProperties,
+} from '../../../security/mpv-policy';
 import { store } from '../settings';
 
 import { isMacOS, isWindows } from '/@/main/env';
 import { PlayerData } from '/@/shared/types/domain-types';
+import { buildMpvAudioFilters } from '/@/shared/utils/mpv-audio-filters';
 
 declare module 'node-mpv';
 
@@ -24,10 +41,7 @@ declare module 'node-mpv';
 // }
 
 let mpvInstance: MpvAPI | null = null;
-// Set while a create is in flight. `mpvInstance` is null across that await, so callers that
-// only check it would otherwise conclude mpv is absent and spawn a throwaway instance
-// alongside the one being started.
-let mpvCreatePromise: null | Promise<MpvAPI> = null;
+let mpvLifecycle: Promise<unknown> = Promise.resolve();
 let currentPlayerData: null | PlayerData = null;
 const socketPath = isWindows() ? `\\\\.\\pipe\\mpvserver-${pid}` : `/tmp/node-mpv-${pid}.sock`;
 
@@ -151,39 +165,39 @@ const resolveMpvBinaryPath = async () => {
     return undefined;
 };
 
-const createMpv = async (data: {
+const createMpv = async ({
+    extraParameters = [],
+    properties = {},
+}: {
     extraParameters?: string[];
-    properties?: Record<string, any>;
+    properties?: MpvPropertySet;
 }): Promise<MpvAPI> => {
-    const { extraParameters, properties } = data;
     const resolvedBinaryPath = await resolveMpvBinaryPath();
-    const normalizedExtraParameters = (extraParameters ?? [])
-        .map((param) => param.trim())
-        .filter((param) => param.length > 0);
+    const params = uniq([...DEFAULT_MPV_PARAMETERS(extraParameters), ...extraParameters]);
+    const launchOptions = buildMpvLaunchOptions(resolvedBinaryPath, socketPath);
 
-    const params = uniq([
-        ...DEFAULT_MPV_PARAMETERS(normalizedExtraParameters),
-        ...normalizedExtraParameters,
-    ]);
-
+    // ipc_command is set in launchOptions, so node-mpv skips its shell-based
+    // mpv --version probe and starts the binary through the argument vector.
     const mpv = new MpvAPI(
-        {
-            audio_only: true,
-            auto_restart: false,
-            binary: resolvedBinaryPath,
-            socket: socketPath,
-            time_update: 1,
-        },
+        launchOptions as unknown as ConstructorParameters<typeof MpvAPI>[0],
         params,
     );
 
     try {
         await mpv.start();
+        await mpv.setMultipleProperties(properties);
         log.info('mpv initialized', { binary: resolvedBinaryPath ?? 'bundled/default' });
-    } catch (error: any) {
-        log.error('mpv failed to start', error);
-    } finally {
-        await mpv.setMultipleProperties(properties || {});
+    } catch (error) {
+        if (getMpvChildProcess(mpv)) {
+            try {
+                await quit(mpv);
+            } catch (cleanupError) {
+                // 保留未完成清理的实例，下次启动前仍需等待它退出。
+                mpvInstance = mpv;
+                log.error('Failed to clean up MPV after startup failure', cleanupError);
+            }
+        }
+        throw error;
     }
 
     let previousPlaylistPos: number | undefined;
@@ -254,78 +268,167 @@ export const getMpvInstance = () => {
 
 const QUIT_TIMEOUT_MS = 3000;
 
-const killMpvProcess = (mpv: MpvAPI) => {
-    const mpvProcess = (mpv as any).process || (mpv as any).mpvProcess;
-    if (mpvProcess && typeof mpvProcess.kill === 'function') {
-        try {
-            mpvProcess.kill('SIGTERM');
-        } catch (killErr) {
-            mpvLog({ action: 'Failed to kill mpv process' }, killErr as NodeMpvError);
-        }
+const getMpvChildProcess = (mpv: MpvAPI): ChildProcess | undefined => mpv.mpvPlayer;
+
+const isMpvChildRunning = (child?: ChildProcess): child is ChildProcess =>
+    child?.pid !== undefined && child.exitCode === null && child.signalCode === null;
+
+const runMpvLifecycle = <T>(operation: () => Promise<T>): Promise<T> => {
+    // 设备枚举、退出和初始化共用同一个 socket，需要按请求顺序执行。
+    const pending = mpvLifecycle.then(operation);
+    mpvLifecycle = pending.catch(() => undefined);
+    return pending;
+};
+
+const withMpvDeadline = async <T>(operation: Promise<T>, message: string): Promise<T> => {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+        return await Promise.race([
+            operation,
+            new Promise<never>((_, reject) => {
+                timeout = setTimeout(() => reject(new Error(message)), QUIT_TIMEOUT_MS);
+            }),
+        ]);
+    } finally {
+        clearTimeout(timeout);
     }
 };
 
-const quit = async (instance?: MpvAPI | null) => {
-    const mpv = instance || getMpvInstance();
-    if (mpv) {
-        suppressRendererPlaybackEvents = true;
-        playbackEventGeneration += 1;
-        try {
-            // mpv.quit() resolves only when mpv replies over IPC. If mpv's command queue
-            // is wedged (e.g. blocked on a dead network stream after the system resumes
-            // from sleep), that reply never arrives, so this must not be allowed to hang
-            // forever - fall back to killing the process directly.
-            let timedOut = false;
-            await Promise.race([
-                mpv.quit(),
-                new Promise((resolve) => {
-                    setTimeout(() => {
-                        timedOut = true;
-                        resolve(undefined);
-                    }, QUIT_TIMEOUT_MS);
-                }),
-            ]);
-
-            if (timedOut) {
-                killMpvProcess(mpv);
-            }
-        } catch {
-            // If quit() fails, try to kill the process directly
-            killMpvProcess(mpv);
-        }
-        if (!isWindows()) {
-            try {
-                await rm(socketPath);
-            } catch {
-                // Ignore errors when removing socket file
-            }
-        }
+const waitForMpvExit = async (child?: ChildProcess) => {
+    if (!isMpvChildRunning(child)) return;
+    const listener = new AbortController();
+    try {
+        await withMpvDeadline(once(child, 'exit', { signal: listener.signal }), 'MPV did not exit');
+    } finally {
+        listener.abort();
     }
+};
+
+const quit = async (mpv: MpvAPI) => {
+    suppressRendererPlaybackEvents = true;
+    playbackEventGeneration += 1;
+    const child = getMpvChildProcess(mpv);
+
+    try {
+        // IPC 回复可能因网络流卡住而永远不到。收到回复后仍须确认进程退出。
+        await withMpvDeadline(mpv.quit(), 'MPV did not answer the quit request');
+        await waitForMpvExit(child);
+    } catch (error) {
+        if (!child) throw error;
+        if (isMpvChildRunning(child)) {
+            child.kill('SIGKILL');
+            await waitForMpvExit(child);
+        }
+        log.warn('MPV quit needed forced cleanup', error);
+    }
+
+    if (!isWindows()) await rm(socketPath, { force: true });
 };
 
 const setAudioPlayerFallback = (isError: boolean) => {
     if (isError) {
-        log.warn('Falling back to web player');
+        log.warn('MPV is unavailable');
     }
     getMainWindow()?.webContents.send('renderer-player-fallback', isError);
 };
 
-ipcMain.on('player-set-properties', async (_event, data: Record<string, any>) => {
-    mpvLog({ action: `Setting properties: ${JSON.stringify(data)}`, level: 'debug' });
-    if (data.length === 0) {
-        return;
-    }
+const quitCurrentMpv = async () => {
+    if (mpvInstance) await quit(mpvInstance);
+    mpvInstance = null;
+};
 
-    try {
-        if (data.length === 1) {
-            getMpvInstance()?.setProperty(Object.keys(data)[0], Object.values(data)[0]);
-        } else {
-            getMpvInstance()?.setMultipleProperties(data);
+const sendMpvPolicyWarning = (kind: 'parameters' | 'properties', rejected: string[]) => {
+    if (rejected.length === 0) return;
+    const visible = rejected.slice(0, 5).join(', ');
+    const suffix = rejected.length > 5 ? ', ...' : '';
+    sendToastToRenderer({
+        message: `Ignored unsupported MPV ${kind}: ${visible}${suffix}`,
+        type: 'warning',
+    });
+};
+
+ipcMain.handle(
+    'player-set-properties',
+    async (event, data: unknown): Promise<MpvOperationResult> => {
+        if (!isTrustedIpcSender(event)) {
+            return { error: 'Untrusted renderer', success: false };
         }
-    } catch (err: any | NodeMpvError) {
-        mpvLog({ action: `Failed to set properties: ${JSON.stringify(data)}` }, err);
-    }
-});
+
+        const validation = validateMpvProperties(data);
+        sendMpvPolicyWarning('properties', validation.rejected);
+        const properties = validation.accepted;
+        const propertyNames = Object.keys(properties);
+        if (propertyNames.length === 0) {
+            return {
+                rejectedProperties: validation.rejected,
+                success: validation.rejected.length === 0,
+            };
+        }
+
+        const mpv = getMpvInstance();
+        if (!mpv) {
+            return {
+                error: 'MPV is not running',
+                rejectedProperties: validation.rejected,
+                success: false,
+            };
+        }
+
+        try {
+            if (propertyNames.length === 1) {
+                await mpv.setProperty(propertyNames[0], properties[propertyNames[0]]);
+            } else {
+                await mpv.setMultipleProperties(properties);
+            }
+            return {
+                rejectedProperties: validation.rejected,
+                success: true,
+            };
+        } catch (err) {
+            mpvLog({ action: 'Failed to set properties' }, err as NodeMpvError);
+            return {
+                ...toMpvOperationError(err),
+                rejectedProperties: validation.rejected,
+            };
+        }
+    },
+);
+
+ipcMain.handle(
+    'player-set-audio-filters',
+    async (
+        event,
+        data: { compressor?: unknown; equalizer?: unknown },
+    ): Promise<MpvOperationResult> => {
+        if (!isTrustedIpcSender(event)) {
+            return { error: 'Untrusted renderer', success: false };
+        }
+
+        const equalizer = validateMpvEqSettings(data?.equalizer);
+        const compressor = validateMpvCompressorSettings(data?.compressor);
+        if (!equalizer.ok || !equalizer.value || !compressor.ok || !compressor.value) {
+            sendToastToRenderer({
+                message: 'Rejected invalid MPV audio filter settings',
+                type: 'warning',
+            });
+            return { error: 'Invalid MPV audio filter settings', success: false };
+        }
+
+        const mpv = getMpvInstance();
+        if (!mpv) {
+            return { error: 'MPV is not running', success: false };
+        }
+
+        try {
+            const filterValue = buildMpvAudioFilters(equalizer.value, compressor.value);
+            await mpv.setProperty('af', filterValue);
+            return { success: true };
+        } catch (err) {
+            mpvLog({ action: 'Failed to set audio filters' }, err as NodeMpvError);
+            return toMpvOperationError(err);
+        }
+    },
+);
 
 ipcMain.handle('mpv-select-binary', async (event) => {
     if (!isTrustedIpcSender(event)) return null;
@@ -354,76 +457,55 @@ ipcMain.handle('mpv-clear-binary', (event) => {
     return true;
 });
 
-ipcMain.handle(
-    'player-restart',
-    async (event, data: { extraParameters?: string[]; properties?: Record<string, any> }) => {
-        if (!isTrustedIpcSender(event)) return;
+const initializeMpv = async (
+    event: Electron.IpcMainInvokeEvent,
+    data: unknown,
+): Promise<MpvInitializeResult> => {
+    if (!isTrustedIpcSender(event)) {
+        return { error: 'Untrusted renderer', success: false };
+    }
+
+    const raw = data && typeof data === 'object' ? (data as Record<string, unknown>) : {};
+    const extraParameters = sanitizeMpvExtraParameters(raw.extraParameters);
+    const properties = validateMpvProperties(raw.properties);
+    const rejectedOptions = {
+        rejectedParameters: extraParameters.rejected,
+        rejectedProperties: properties.rejected,
+    };
+    sendMpvPolicyWarning('parameters', extraParameters.rejected);
+    sendMpvPolicyWarning('properties', properties.rejected);
+
+    return runMpvLifecycle(async () => {
         try {
-            mpvLog({
-                action: `Attempting to initialize mpv with parameters: ${JSON.stringify(data)}`,
-                level: 'debug',
+            await quitCurrentMpv();
+            mpvInstance = await createMpv({
+                extraParameters: extraParameters.accepted,
+                properties: properties.accepted,
             });
-
-            // Clean up previous mpv instance
-            suppressRendererPlaybackEvents = true;
-            playbackEventGeneration += 1;
-            getMpvInstance()?.stop();
-            getMpvInstance()
-                ?.quit()
-                .catch((error) => {
-                    mpvLog({ action: 'Failed to quit existing MPV' }, error);
-                });
-            mpvInstance = null;
-
-            mpvCreatePromise = createMpv(data);
-            try {
-                mpvInstance = await mpvCreatePromise;
-            } finally {
-                mpvCreatePromise = null;
-            }
-            mpvLog({ action: 'Restarted mpv', toast: 'success' });
             setAudioPlayerFallback(false);
-        } catch (err: any | NodeMpvError) {
-            mpvLog({ action: 'Failed to restart mpv, falling back to web player' }, err);
+            return { ...rejectedOptions, success: true };
+        } catch (error) {
+            mpvLog({ action: 'Failed to initialize MPV' }, error as NodeMpvError);
             setAudioPlayerFallback(true);
+            return { ...rejectedOptions, ...toMpvOperationError(error) };
         }
-    },
-);
+    });
+};
 
-ipcMain.handle(
-    'player-initialize',
-    async (event, data: { extraParameters?: string[]; properties?: Record<string, any> }) => {
-        if (!isTrustedIpcSender(event)) return;
-        try {
-            mpvLog({
-                action: `Attempting to initialize mpv with parameters: ${JSON.stringify(data)}`,
-                level: 'debug',
-            });
-            mpvCreatePromise = createMpv(data);
-            try {
-                mpvInstance = await mpvCreatePromise;
-            } finally {
-                mpvCreatePromise = null;
-            }
-            setAudioPlayerFallback(false);
-        } catch (err: any | NodeMpvError) {
-            mpvLog({ action: 'Failed to initialize mpv, falling back to web player' }, err);
-            setAudioPlayerFallback(true);
-        }
-    },
-);
+ipcMain.handle('player-initialize', initializeMpv);
 
-ipcMain.on('player-quit', async () => {
-    // stop() also drives playlist-pos to -1; suppress before that so reload does not look like a track end.
-    suppressRendererPlaybackEvents = true;
-    playbackEventGeneration += 1;
+ipcMain.handle('player-restart', async (event, settings: unknown) => {
+    const result = await initializeMpv(event, settings);
+    if (result.success) mpvLog({ action: 'Restarted mpv', toast: 'success' });
+    return result;
+});
+
+ipcMain.on('player-quit', async (event) => {
+    if (!isTrustedIpcSender(event)) return;
     try {
-        await getMpvInstance()?.stop();
-        await quit();
-    } catch (err: any | NodeMpvError) {
-        mpvLog({ action: 'Failed to quit mpv' }, err);
-    } finally {
-        mpvInstance = null;
+        await runMpvLifecycle(quitCurrentMpv);
+    } catch (error) {
+        mpvLog({ action: 'Failed to quit MPV' }, error as NodeMpvError);
     }
 });
 
@@ -726,63 +808,43 @@ ipcMain.handle(
     async (event): Promise<{ label: string; value: string }[]> => {
         if (!isTrustedIpcSender(event)) return [];
         try {
-            // Wait out an in-flight startup so the real instance is reused instead of racing it.
-            if (mpvCreatePromise) {
-                try {
-                    await mpvCreatePromise;
-                } catch {
-                    // Startup failed; fall through to the temporary-instance path below.
-                }
-            }
+            return await runMpvLifecycle(async () => {
+                const current = mpvInstance?.isRunning() ? mpvInstance : null;
+                if (!current) await quitCurrentMpv();
+                const mpv = current ?? (await createMpv({}));
 
-            const instance = getMpvInstance();
-            let tempInstance: MpvAPI | null = null;
-            let mpvToUse: MpvAPI | null = null;
-
-            if (instance && instance.isRunning()) {
-                mpvToUse = instance;
-            } else {
                 try {
-                    tempInstance = await createMpv({});
-                    mpvToUse = tempInstance;
-                } catch (err: any | NodeMpvError) {
-                    mpvLog(
-                        { action: 'Failed to create temporary MPV instance for audio device list' },
-                        err,
+                    const devices = await withMpvDeadline(
+                        mpv.getProperty('audio-device-list'),
+                        'MPV did not answer the audio device request',
                     );
-                    return [];
-                }
-            }
+                    if (!Array.isArray(devices)) return [];
 
-            try {
-                const deviceList = await mpvToUse.getProperty('audio-device-list');
-
-                if (!deviceList || !Array.isArray(deviceList)) {
-                    return [];
-                }
-
-                const devices = deviceList.map((device: any) => {
-                    const name = device.name || device.description || 'Unknown Device';
-                    const description = device.description || '';
-                    const label = description ? `${name} (${description})` : name;
-                    return {
-                        label,
-                        value: name,
-                    };
-                });
-
-                return devices;
-            } finally {
-                if (tempInstance && tempInstance !== instance) {
-                    try {
-                        await quit(tempInstance);
-                    } catch {
-                        // Ignore
+                    return devices.map((device) => {
+                        const name = device.name || device.description || 'Unknown Device';
+                        const description = device.description || '';
+                        return {
+                            label: description ? `${name} (${description})` : name,
+                            value: name,
+                        };
+                    });
+                } finally {
+                    if (!current) {
+                        try {
+                            await quit(mpv);
+                        } catch (error) {
+                            // 让下一次生命周期操作重试清理这个实例。
+                            mpvInstance = mpv;
+                            mpvLog(
+                                { action: 'Failed to clean up the MPV device probe' },
+                                error as NodeMpvError,
+                            );
+                        }
                     }
                 }
-            }
-        } catch (err: any | NodeMpvError) {
-            mpvLog({ action: 'Failed to get audio devices' }, err);
+            });
+        } catch (error) {
+            mpvLog({ action: 'Failed to get audio devices' }, error as NodeMpvError);
             return [];
         }
     },
@@ -798,31 +860,12 @@ let mpvState = MpvState.STARTED;
 
 // Cleanup function that can be called from multiple places
 const cleanupMpv = async (force = false) => {
-    if (mpvState === MpvState.DONE && !force) {
-        return;
-    }
+    if (mpvState === MpvState.DONE && !force) return;
 
-    const instance = getMpvInstance();
-    if (instance) {
-        try {
-            if (!force) {
-                await instance.stop();
-            }
-            await quit(instance);
-        } catch (err: any | NodeMpvError) {
-            mpvLog({ action: `Failed to cleanup mpv` }, err);
-            // Force kill as fallback
-            const mpvProcess = (instance as any).process || (instance as any).mpvProcess;
-            if (mpvProcess && typeof mpvProcess.kill === 'function') {
-                try {
-                    mpvProcess.kill('SIGKILL');
-                } catch {
-                    // Ignore kill errors
-                }
-            }
-        } finally {
-            mpvInstance = null;
-        }
+    try {
+        await runMpvLifecycle(quitCurrentMpv);
+    } catch (error) {
+        mpvLog({ action: 'Failed to clean up MPV' }, error as NodeMpvError);
     }
 };
 
@@ -863,8 +906,8 @@ process.on('exit', () => {
     const instance = getMpvInstance();
     if (instance) {
         // Try to access and kill the process directly
-        const mpvProcess = (instance as any).process || (instance as any).mpvProcess;
-        if (mpvProcess && typeof mpvProcess.kill === 'function') {
+        const mpvProcess = getMpvChildProcess(instance);
+        if (mpvProcess) {
             try {
                 mpvProcess.kill('SIGKILL');
             } catch {

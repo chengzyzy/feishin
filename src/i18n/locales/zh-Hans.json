@@ -680,6 +680,7 @@
         "localFontAccessDenied": "无法获取本地字体",
         "serverNotSelectedError": "未选择服务器",
         "remoteDisableError": "尝试 $t(common.disable) 远程服务器时出错",
+        "mpvInitializeFailed": "本地 MPV 播放器启动失败。请检查 MPV 可执行文件路径，或改用其他播放器",
         "mpvRequired": "需要 MPV",
         "audioDeviceFetchError": "尝试获取音频设备时出错",
         "invalidServer": "无效的服务器",

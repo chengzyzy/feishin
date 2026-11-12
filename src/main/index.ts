@@ -944,17 +944,6 @@ if (!singleInstance) {
                 callback(ALLOWED_PERMISSIONS.has(permission)),
             );
 
-            session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
-                callback({
-                    responseHeaders: {
-                        ...details.responseHeaders,
-                        'Content-Security-Policy': [
-                            "script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; media-src 'self' http: https: data: blob:; img-src 'self' http: https: data: blob:; connect-src 'self' http: https: ws: wss:; default-src 'self';",
-                        ],
-                    },
-                });
-            });
-
             createWindow();
             if (store.get('window_enable_tray', true)) {
                 createTray();

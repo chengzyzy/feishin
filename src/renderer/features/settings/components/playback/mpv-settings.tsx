@@ -72,7 +72,7 @@ export const MpvSettings = memo(() => {
 
         const mpvSetting = getMpvSetting(setting, value);
 
-        mpvPlayer?.setProperties(mpvSetting);
+        void mpvPlayer?.setProperties(mpvSetting);
     };
 
     const player = usePlayer();

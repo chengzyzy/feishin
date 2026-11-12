@@ -1,13 +1,12 @@
+import type {
+    MpvCompressorSettings as CompressorSettings,
+    MpvEqSettings as EqSettingsType,
+} from '/@/shared/types/mpv-settings';
+
 import { useMove } from '@mantine/hooks';
 import isElectron from 'is-electron';
 import { memo, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-
-import {
-    buildMpvAudioFilters,
-    type CompressorSettings,
-    type EqSettings as EqSettingsType,
-} from './mpv-audio-filters';
 
 import { WebAudioContext } from '/@/renderer/features/player/context/webaudio-context';
 import {
@@ -285,8 +284,9 @@ export const EqSettings = memo(() => {
         (eq: EqSettingsType, compressor: CompressorSettings) => {
             // ── MPV player ────────────────────────────────────────────────
             if (settings.type === PlayerType.LOCAL) {
-                const filterStr = buildMpvAudioFilters(eq, compressor);
-                mpvPlayer?.setProperties({ af: filterStr });
+                // The main process validates the numeric settings and builds the
+                // controlled af value; arbitrary filter text is not accepted here.
+                void mpvPlayer?.setAudioFilters(eq, compressor);
                 return;
             }
 

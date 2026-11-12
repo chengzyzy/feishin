@@ -67,7 +67,7 @@ const createConfig = (isDevelopment: boolean): UserConfig => ({
         plugins: [
             createReactPlugin(),
             ...(isDevelopment ? [kuromojiDictionaryPlugin({ emitDictionary: false })] : []),
-            ViteEjsPlugin({ web: false }),
+            ViteEjsPlugin({ dev: isDevelopment, web: false }),
         ],
         resolve: {
             alias: {

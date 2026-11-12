@@ -4,6 +4,14 @@
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
         <title>Feishin</title>
+        <% if (!web && !dev) { %>
+        <!-- Production file:// document CSP. unsafe-eval is required by the local
+             MilkDrop/Butterchurn visualizer preset execution; no inline or remote scripts. -->
+        <meta
+            http-equiv="Content-Security-Policy"
+            content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http: https:; media-src 'self' data: blob: http: https:; font-src 'self' data:; connect-src 'self' http: https: ws: wss:; worker-src 'self'; object-src 'none'; base-uri 'self';"
+        />
+        <% } %>
         <% if (web) { %>
         <link rel="icon" href="./assets/favicon.ico" />
         <script src="settings.js"></script>

@@ -1,6 +1,7 @@
 import isElectron from 'is-electron';
 import { useEffect } from 'react';
 
+import i18n from '/@/i18n/i18n';
 import { eventEmitter } from '/@/renderer/events/event-emitter';
 import { UserFavoriteEventPayload, UserRatingEventPayload } from '/@/renderer/events/events';
 import { DiscordRpcHook } from '/@/renderer/features/discord-rpc/use-discord-rpc';
@@ -203,6 +204,7 @@ const AudioPlayersContent = ({
         mpvPlayerListener.rendererPlayerFallback((isFallback: boolean) => {
             if (isFallback) {
                 logger.warn('Playback engine fell back to web');
+                toast.error({ message: i18n.t('error.mpvInitializeFailed') });
             } else {
                 logger.info('Playback engine using local (mpv)');
             }

@@ -1,12 +1,25 @@
+import type {
+    MpvCompressorSettings,
+    MpvEqSettings,
+    MpvInitializeResult,
+    MpvOperationResult,
+} from '/@/shared/types/mpv-settings';
+
 import { ipcRenderer } from 'electron';
 
 import { PlayerData } from '/@/shared/types/domain-types';
 
-const initialize = (data: { extraParameters?: string[]; properties?: Record<string, any> }) => {
+const initialize = (data: {
+    extraParameters?: string[];
+    properties?: Record<string, unknown>;
+}): Promise<MpvInitializeResult> => {
     return ipcRenderer.invoke('player-initialize', data);
 };
 
-const restart = (data: { extraParameters?: string[]; properties?: Record<string, any> }) => {
+const restart = (data: {
+    extraParameters?: string[];
+    properties?: Record<string, unknown>;
+}): Promise<MpvInitializeResult> => {
     return ipcRenderer.invoke('player-restart', data);
 };
 
@@ -26,8 +39,15 @@ const cleanup = () => {
     return ipcRenderer.invoke('player-clean-up');
 };
 
-const setProperties = (data: Record<string, any>) => {
-    ipcRenderer.send('player-set-properties', data);
+const setProperties = (data: Record<string, unknown>): Promise<MpvOperationResult> => {
+    return ipcRenderer.invoke('player-set-properties', data);
+};
+
+const setAudioFilters = (
+    equalizer: MpvEqSettings,
+    compressor: MpvCompressorSettings,
+): Promise<MpvOperationResult> => {
+    return ipcRenderer.invoke('player-set-audio-filters', { compressor, equalizer });
 };
 
 const autoNext = (url?: string) => {
@@ -215,6 +235,7 @@ export const mpvPlayer = {
     seek,
     seekTo,
     selectBinary,
+    setAudioFilters,
     setProperties,
     setQueue,
     setQueueNext,
